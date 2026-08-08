@@ -487,6 +487,7 @@ async function pullFromDrive({ interactive = false } = {}) {
     ).json();
 
     await idb.set('archive', data);
+    lastPullAt = Date.now();
     applyData(data);
     setStatus($('status'), `${items.length} 件を取り込みました（${fmtDate(generatedAt)} 時点）`);
     setTimeout(() => setStatus($('status'), ''), 4000);
@@ -590,6 +591,21 @@ function renderDiag() {
 addEventListener('resize', renderDiag);
 
 $('refresh').addEventListener('click', () => pullFromDrive({ interactive: false }));
+
+/*
+ * ホーム画面から戻ってきたときに取り込み直す。
+ * 起動時にしか取りに行かないと、PWA を閉じずに放置している間に
+ * PC 側で増えた要約が反映されない。
+ */
+let lastPullAt = 0;
+const PULL_MIN_INTERVAL_MS = 60_000;
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!navigator.onLine || !LS.clientId) return;
+  if (Date.now() - lastPullAt < PULL_MIN_INTERVAL_MS) return;
+  pullFromDrive({ interactive: false });
+});
 $('q').addEventListener('input', (e) => {
   term = e.target.value;
   renderList();
