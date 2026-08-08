@@ -51,6 +51,11 @@ html, body {
 .view { display: flex; flex-direction: column; height: 100dvh; }
 [hidden] { display: none !important; }
 
+/* 仕切りは 2ペインのときだけ出す。
+   この既定値は必ずメディアクエリより前に置くこと。
+   後ろに書くと同じ詳細度で打ち消してしまい、2ペインでも出なくなる。 */
+.splitter { display: none; }
+
 /* --------------------------------------------------------- ヘッダー */
 
 .top {
@@ -335,9 +340,54 @@ code {
 @media (min-width: 560px) and (min-height: 560px) {
   .shell {
     display: grid;
-    grid-template-columns: minmax(300px, 380px) 1fr;
+    /* 中央の 1px が仕切り。幅は JS が --pane-w に入れる */
+    grid-template-columns: var(--pane-w, 360px) 1px 1fr;
     height: 100dvh;
   }
+
+  .splitter {
+    display: block;
+    position: relative;
+    background: var(--line);
+    cursor: col-resize;
+    /* ドラッグ中にページがスクロールしないようにする */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* 指で掴めるよう、見た目の線より広い当たり判定を左右に張り出させる */
+  .splitter::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -11px;
+    right: -11px;
+    z-index: 5;
+  }
+
+  /* つまみ。掴めることが分かるように */
+  .splitter::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 4px;
+    height: 48px;
+    transform: translate(-50%, -50%);
+    border-radius: 999px;
+    background: var(--muted);
+    opacity: .45;
+    z-index: 6;
+    pointer-events: none;
+    transition: background .15s var(--ease), opacity .15s var(--ease), height .15s var(--ease);
+  }
+
+  .splitter:hover::after { opacity: .8; }
+  .splitter:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .splitter.dragging { background: var(--accent); }
+  .splitter.dragging::after { background: var(--accent); opacity: 1; height: 72px; }
 
   /* 2ペインのときは、片方を隠す JS の指定より横並びを優先する */
   #listView[hidden],
@@ -346,7 +396,7 @@ code {
   }
 
   .shell .view { height: 100%; min-height: 0; }
-  #listView { border-right: 1px solid var(--line); }
+  /* 境界線は仕切り側が持つので、一覧側には引かない */
 
   /* 一覧側は幅が狭いので、ヘッダーを 1 段に詰める */
   #listView .top { padding-block: 12px; }

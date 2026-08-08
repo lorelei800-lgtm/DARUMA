@@ -322,6 +322,92 @@ function applyLayout() {
   }
 }
 
+/* ------------------------------------------------------ 仕切りの幅 */
+
+/*
+ * 2ペインの境目をドラッグして一覧の幅を変えられるようにする。
+ * 指で操作する前提なので、当たり判定は CSS 側で見た目の線より広げてある。
+ */
+const PANE_DEFAULT = 360;
+const PANE_MIN = 220;      // 一覧側の下限
+const PANE_MIN_RIGHT = 260; // 要約側に最低限残す幅
+let paneW = PANE_DEFAULT;
+
+function clampPane(w) {
+  const max = Math.max(PANE_MIN, innerWidth - PANE_MIN_RIGHT);
+  return Math.round(Math.min(Math.max(w, PANE_MIN), max));
+}
+
+function applyPaneWidth(w, persist) {
+  paneW = clampPane(w);
+  document.querySelector('.shell').style.setProperty('--pane-w', `${paneW}px`);
+  if (persist) localStorage.setItem('daruma.paneW', String(paneW));
+}
+
+function initSplitter() {
+  const stored = Number(localStorage.getItem('daruma.paneW'));
+  applyPaneWidth(Number.isFinite(stored) && stored > 0 ? stored : PANE_DEFAULT, false);
+
+  const splitter = $('splitter');
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  /*
+   * ドラッグ中かどうかは自前のフラグで持ち、移動と終了は window で受ける。
+   * setPointerCapture に頼ると、捕捉に失敗したときにドラッグごと死ぬうえ、
+   * 指が要素の外へ出た瞬間に追従しなくなる。捕捉は「できたら使う」程度に留める。
+   */
+  splitter.addEventListener('pointerdown', (e) => {
+    if (!isWide()) return;
+    dragging = true;
+    startX = e.clientX;
+    startW = paneW;
+    try {
+      splitter.setPointerCapture(e.pointerId);
+    } catch {
+      /* 捕捉できなくても window 監視で動く */
+    }
+    splitter.classList.add('dragging');
+    e.preventDefault();
+  });
+
+  addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    applyPaneWidth(startW + (e.clientX - startX), false);
+  });
+
+  const end = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    try {
+      splitter.releasePointerCapture(e.pointerId);
+    } catch {
+      /* 捕捉していなければ何もしなくてよい */
+    }
+    splitter.classList.remove('dragging');
+    applyPaneWidth(paneW, true); // 離したときに憶える
+  };
+  addEventListener('pointerup', end);
+  addEventListener('pointercancel', end);
+
+  // ダブルタップで既定値に戻す
+  splitter.addEventListener('dblclick', () => applyPaneWidth(PANE_DEFAULT, true));
+
+  // キーボードでも動かせるようにする
+  splitter.addEventListener('keydown', (e) => {
+    const step = e.shiftKey ? 40 : 16;
+    if (e.key === 'ArrowLeft') applyPaneWidth(paneW - step, true);
+    else if (e.key === 'ArrowRight') applyPaneWidth(paneW + step, true);
+    else if (e.key === 'Home') applyPaneWidth(PANE_DEFAULT, true);
+    else return;
+    e.preventDefault();
+  });
+}
+
+// 画面の大きさが変わったら、はみ出さないように収め直す
+addEventListener('resize', () => applyPaneWidth(paneW, false));
+
 // 画面を開いた/閉じた瞬間に組み直す
 WIDE.addEventListener('change', () => {
   // 2ペインから1画面へ移るとき、直前に見ていた項目は開いたままにする
@@ -615,6 +701,7 @@ $('q').addEventListener('input', (e) => {
 
 (async () => {
   // まずキャッシュを出す。オフラインでもすぐ読める状態にしてから通信する。
+  initSplitter();
   const cached = await idb.get('archive').catch(() => null);
   if (cached) applyData(cached);
   else renderList();

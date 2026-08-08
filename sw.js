@@ -8,7 +8,7 @@
 
 // 版番号を上げると、次に開いたときに新しいシェルを取り直す。
 // アプリ本体を変えたら必ず上げること。
-const CACHE = 'daruma-shell-v4';
+const CACHE = 'daruma-shell-v5';
 const SHELL = [
   './',
   './index.html',
