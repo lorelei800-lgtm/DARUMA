@@ -97,9 +97,31 @@ const norm = (s) =>
     .toLowerCase()
     .replace(/[\s・･、。,.\-‐−–—_]/g, '');
 
+/**
+ * 状態表示。
+ * 文中に URL があればリンクにする。対処先の URL を出しても
+ * タップできなければ意味がないため。
+ */
 function setStatus(node, text, isErr = false) {
-  node.textContent = text || '';
+  node.replaceChildren();
   node.classList.toggle('err', !!isErr);
+  if (!text) return;
+
+  const m = String(text).match(/https?:\/\/\S+/);
+  if (!m) {
+    node.textContent = text;
+    return;
+  }
+  const url = m[0];
+  const at = text.indexOf(url);
+  node.appendChild(document.createTextNode(text.slice(0, at)));
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  a.textContent = url;
+  node.appendChild(a);
+  node.appendChild(document.createTextNode(text.slice(at + url.length)));
 }
 
 /* ------------------------------------------------------- markdown */
@@ -338,12 +360,35 @@ async function getToken({ interactive = false } = {}) {
 
 async function driveFetch(url, token) {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (res.status === 401 || res.status === 403) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Drive の認可が通りません (${res.status}). ${body.slice(0, 160)}`);
+  if (res.ok) return res;
+
+  // 生のエラー本文をそのまま出すと、肝心の対処先 URL が途中で切れて読めない。
+  // よくある原因は個別に判定して、何をすればよいかだけを伝える。
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    /* JSON でないこともある */
   }
-  if (!res.ok) throw new Error(`Drive エラー ${res.status}`);
-  return res;
+  const msg = body?.error?.message || '';
+  const reason = `${body?.error?.status || ''} ${body?.error?.errors?.[0]?.reason || ''}`;
+
+  if (res.status === 403 && /has not been used in project|SERVICE_DISABLED|accessNotConfigured/i.test(`${msg} ${reason}`)) {
+    const project = (msg.match(/project (\d+)/) || [])[1];
+    const link =
+      'https://console.cloud.google.com/apis/library/drive.googleapis.com' +
+      (project ? `?project=${project}` : '');
+    throw new Error(
+      `Google Cloud で Drive API が有効になっていません。次のページで「有効にする」を押し、数分待ってから ⟳ をもう一度押してください: ${link}`
+    );
+  }
+  if (res.status === 401) {
+    throw new Error('認証の有効期限が切れました。設定から「Google と連携する」を押し直してください。');
+  }
+  if (res.status === 403) {
+    throw new Error(`Drive へのアクセスが拒否されました (403)。${msg.slice(0, 220)}`);
+  }
+  throw new Error(`Drive エラー ${res.status}。${msg.slice(0, 220)}`);
 }
 
 async function pullFromDrive({ interactive = false } = {}) {

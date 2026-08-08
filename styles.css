@@ -143,6 +143,7 @@ html, body {
 }
 .status:empty { display: none; }
 .status.err { color: var(--accent); }
+.status a { color: inherit; text-decoration: underline; word-break: break-all; }
 
 /* --------------------------------------------------------- 一覧 */
 

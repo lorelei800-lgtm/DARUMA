@@ -6,7 +6,7 @@
  * 古いトークン処理や応答を握ってしまうと、原因の分かりにくい不具合になる。
  */
 
-const CACHE = 'daruma-shell-v1';
+const CACHE = 'daruma-shell-v2';
 const SHELL = [
   './',
   './index.html',
