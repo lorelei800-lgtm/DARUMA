@@ -6,7 +6,9 @@
  * 古いトークン処理や応答を握ってしまうと、原因の分かりにくい不具合になる。
  */
 
-const CACHE = 'daruma-shell-v2';
+// 版番号を上げると、次に開いたときに新しいシェルを取り直す。
+// アプリ本体を変えたら必ず上げること。
+const CACHE = 'daruma-shell-v3';
 const SHELL = [
   './',
   './index.html',

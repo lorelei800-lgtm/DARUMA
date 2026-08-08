@@ -261,7 +261,9 @@ let detailOpen = false;
  * 画面が広いとき（Galaxy Z Fold を開いた状態やタブレット）は
  * 一覧と要約を横に並べる。閉じれば 1 画面に戻る。
  */
-const WIDE = matchMedia('(min-width: 720px)');
+// styles.css の 2ペイン用メディアクエリと必ず同じ条件にすること。
+// ずれると「CSS は横並びなのに JS が片方を隠す」状態になる。
+const WIDE = matchMedia('(min-width: 560px) and (min-height: 560px)');
 const isWide = () => WIDE.matches;
 
 function markSelection() {
@@ -325,6 +327,7 @@ WIDE.addEventListener('change', () => {
   // 2ペインから1画面へ移るとき、直前に見ていた項目は開いたままにする
   if (!isWide() && selectedId) detailOpen = true;
   applyLayout();
+  renderDiag();
 });
 
 function renderDetail(r) {
@@ -510,6 +513,7 @@ function applyData(data) {
 function openSettings() {
   $('originHint').textContent = location.origin;
   $('clientId').value = LS.clientId;
+  renderDiag();
   // 設定は 2ペインでも全画面で出す
   document.querySelector('.shell').hidden = true;
   $('settingsView').hidden = false;
@@ -549,10 +553,41 @@ $('clearCache').addEventListener('click', async () => {
   await idb.set('archive', null);
   items = [];
   generatedAt = 0;
+  selectedId = null;
   renderChannels();
   renderList();
-  setStatus($('dataStatus'), 'キャッシュを消しました');
+  applyLayout();
+  setStatus($('dataStatus'), '取り込んだ要約を消しました');
 });
+
+/*
+ * アプリ本体の入れ替え。
+ *
+ * service worker がアプリシェルをキャッシュしているため、更新しても
+ * 次に開くまで古い画面が出る。ここで明示的に捨てて読み直せるようにする。
+ * （「取り込んだ要約を消す」は要約データだけで、アプリ本体は消えない）
+ */
+$('updateApp').addEventListener('click', async () => {
+  setStatus($('diag'), '更新しています…');
+  try {
+    for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+    for (const k of await caches.keys()) await caches.delete(k);
+  } catch {
+    /* 消せなくても読み直しは試みる */
+  }
+  location.reload();
+});
+
+/** 画面サイズと 2ペインの判定結果。効かないときの切り分けに使う。 */
+function renderDiag() {
+  const node = $('diag');
+  if (!node) return;
+  setStatus(
+    node,
+    `画面 ${innerWidth} × ${innerHeight} px ／ 2ペイン: ${isWide() ? '有効' : '無効（560×560 以上で有効）'}`
+  );
+}
+addEventListener('resize', renderDiag);
 
 $('refresh').addEventListener('click', () => pullFromDrive({ interactive: false }));
 $('q').addEventListener('input', (e) => {
