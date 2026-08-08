@@ -317,19 +317,57 @@ code {
 
 /* --------------------------------------------------------- 大画面 */
 
-/* スマホ向けに作っているが、タブレットや PC のブラウザで開かれることもある。
-   幅いっぱいに伸ばすとサムネイルが巨大になって読みにくいので、読み幅を制限する。 */
-@media (min-width: 700px) {
-  .searchbar,
-  .chips,
-  .status,
-  .list,
-  .detail-body,
-  .settings {
-    width: 100%;
-    max-width: 720px;
-    margin-inline: auto;
+/*
+ * Galaxy Z Fold を開いたとき（内側画面は CSS 幅で約 880px）や
+ * タブレット・PC では、左に一覧・右に要約の 2 ペインにする。
+ * カバー画面は約 410px なので、閉じれば自動的に 1 画面に戻る。
+ */
+@media (min-width: 720px) {
+  .shell {
+    display: grid;
+    grid-template-columns: minmax(300px, 380px) 1fr;
+    height: 100dvh;
   }
-  .top { padding-inline: max(14px, calc((100% - 720px) / 2)); }
-  .dhead img { max-height: 380px; object-fit: cover; }
+
+  /* 2ペインのときは、片方を隠す JS の指定より横並びを優先する */
+  #listView[hidden],
+  #detailView[hidden] {
+    display: flex !important;
+  }
+
+  .shell .view { height: 100%; min-height: 0; }
+  #listView { border-right: 1px solid var(--line); }
+
+  /* 一覧側は幅が狭いので、ヘッダーを 1 段に詰める */
+  #listView .top { padding-block: 12px; }
+  #listView .row img { width: 88px; height: 50px; }
+  #listView .row .t { font-size: 13.5px; }
+
+  /* 詳細側は読み幅を制限する。伸ばしきると 1 行が長すぎて読みにくい */
+  .detail-body { padding: 24px 28px calc(48px + var(--safe-bottom)); }
+  .detail-body > * { max-width: 720px; margin-inline: auto; }
+  .dhead img { max-height: 300px; object-fit: cover; }
+
+  /* 2ペインでは戻るボタンは要らない */
+  #back { display: none; }
+
+  .settings { width: 100%; max-width: 720px; margin-inline: auto; }
+}
+
+/* 選択中の項目を分かるようにする（2ペインでは特に必要） */
+.row[aria-selected="true"] {
+  background: var(--accent-weak);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* 右ペインに何も出ていないときの案内 */
+.detail-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
+  padding: 24px;
 }

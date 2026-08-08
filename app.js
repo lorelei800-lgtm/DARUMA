@@ -240,6 +240,8 @@ function renderList() {
     body.appendChild(meta);
     if (r.headline) body.appendChild(el('div', 'h', r.headline));
 
+    row.dataset.videoId = r.videoId;
+    row.setAttribute('aria-selected', String(selectedId === r.videoId));
     row.append(img, body);
     row.addEventListener('click', () => openDetail(r));
     box.appendChild(row);
@@ -249,16 +251,81 @@ function renderList() {
 /* ------------------------------------------------------------ 詳細 */
 
 let detailTier = 'quick';
+let selectedId = null;
+// 「いま詳細を全画面で開いているか」。selectedId とは別に持つ必要がある。
+// 1画面のときに戻るで一覧へ帰っても選択は残しておきたいが、
+// その状態で折りたたみ直したときに詳細を開き直してはいけないため。
+let detailOpen = false;
+
+/*
+ * 画面が広いとき（Galaxy Z Fold を開いた状態やタブレット）は
+ * 一覧と要約を横に並べる。閉じれば 1 画面に戻る。
+ */
+const WIDE = matchMedia('(min-width: 720px)');
+const isWide = () => WIDE.matches;
+
+function markSelection() {
+  for (const row of document.querySelectorAll('#list .row')) {
+    row.setAttribute('aria-selected', String(row.dataset.videoId === selectedId));
+  }
+}
+
+function renderDetailPlaceholder() {
+  $('detailTitle').textContent = '';
+  $('detail').replaceChildren(el('div', 'detail-placeholder', '左の一覧から選んでください'));
+}
 
 function openDetail(r) {
+  selectedId = r.videoId;
   detailTier = r.deep ? 'deep' : 'quick';
   renderDetail(r);
-  $('listView').hidden = true;
+  markSelection();
   $('settingsView').hidden = true;
   $('detailView').hidden = false;
   $('detail').scrollTop = 0;
-  history.pushState({ view: 'detail' }, '');
+
+  // 2ペインのときは一覧を残したまま右側だけ差し替える。
+  // 戻る操作も要らないので履歴も積まない。
+  if (isWide()) return;
+
+  detailOpen = true;
+  $('listView').hidden = true;
+  pushDetailState();
 }
+
+/** 1画面のときだけ、戻るで一覧に帰れるように履歴を積む。 */
+function pushDetailState() {
+  if (history.state?.view !== 'detail') history.pushState({ view: 'detail' }, '');
+}
+
+/**
+ * 折りたたみ・展開で画面の組み立て方が変わるので、その都度整える。
+ * 特に「詳細を開いたまま折りたたむ」を取りこぼすと、
+ * 一覧と詳細が縦に積み重なって表示されてしまう。
+ */
+function applyLayout() {
+  if (isWide()) {
+    $('listView').hidden = false;
+    $('detailView').hidden = false;
+    if (!selectedId) renderDetailPlaceholder();
+    return;
+  }
+  if (detailOpen && selectedId) {
+    $('listView').hidden = true;
+    $('detailView').hidden = false;
+    pushDetailState(); // 折りたたんだ直後でも戻るで一覧へ帰れるように
+  } else {
+    $('detailView').hidden = true;
+    $('listView').hidden = false;
+  }
+}
+
+// 画面を開いた/閉じた瞬間に組み直す
+WIDE.addEventListener('change', () => {
+  // 2ペインから1画面へ移るとき、直前に見ていた項目は開いたままにする
+  if (!isWide() && selectedId) detailOpen = true;
+  applyLayout();
+});
 
 function renderDetail(r) {
   $('detailTitle').textContent = r.channel || 'DARUMA';
@@ -309,9 +376,12 @@ function renderDetail(r) {
 }
 
 function closeOverlay() {
-  $('detailView').hidden = true;
   $('settingsView').hidden = true;
-  $('listView').hidden = false;
+  document.querySelector('.shell').hidden = false;
+  // 一覧へ帰ったので、この後に折りたたんでも詳細を開き直さない。
+  // 選択自体は残しておき、開いたときに右側へ出す。
+  detailOpen = false;
+  applyLayout();
 }
 
 $('back').addEventListener('click', () => history.back());
@@ -440,8 +510,8 @@ function applyData(data) {
 function openSettings() {
   $('originHint').textContent = location.origin;
   $('clientId').value = LS.clientId;
-  $('listView').hidden = true;
-  $('detailView').hidden = true;
+  // 設定は 2ペインでも全画面で出す
+  document.querySelector('.shell').hidden = true;
   $('settingsView').hidden = false;
   history.pushState({ view: 'settings' }, '');
 }
@@ -497,6 +567,7 @@ $('q').addEventListener('input', (e) => {
   const cached = await idb.get('archive').catch(() => null);
   if (cached) applyData(cached);
   else renderList();
+  applyLayout();
 
   if (!LS.clientId) {
     setStatus($('status'), '設定から OAuth クライアント ID を登録してください');

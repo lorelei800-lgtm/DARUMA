@@ -10,6 +10,8 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <!-- 一覧と詳細。画面が広いとき（Fold を開いたとき）は横に並べる -->
+    <div class="shell">
     <!-- ------------------------------------------------ 一覧 -->
     <div id="listView" class="view">
       <header class="top">
@@ -37,6 +39,7 @@
       </header>
       <main id="detail" class="detail-body"></main>
     </div>
+    </div><!-- /.shell -->
 
     <!-- ------------------------------------------------ 設定 -->
     <div id="settingsView" class="view" hidden>
