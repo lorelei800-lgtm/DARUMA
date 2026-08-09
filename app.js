@@ -341,6 +341,8 @@ function clampPane(w) {
 function applyPaneWidth(w, persist) {
   paneW = clampPane(w);
   document.querySelector('.shell').style.setProperty('--pane-w', `${paneW}px`);
+  const hint = $('splitterHint');
+  if (hint) hint.textContent = `${paneW}px`;
   if (persist) localStorage.setItem('daruma.paneW', String(paneW));
 }
 
@@ -369,6 +371,8 @@ function initSplitter() {
       /* 捕捉できなくても window 監視で動く */
     }
     splitter.classList.add('dragging');
+    const hint = $('splitterHint');
+    if (hint) hint.style.opacity = '1';
     e.preventDefault();
   });
 
@@ -386,6 +390,8 @@ function initSplitter() {
       /* 捕捉していなければ何もしなくてよい */
     }
     splitter.classList.remove('dragging');
+    const hint = $('splitterHint');
+    if (hint) hint.style.opacity = '0';
     applyPaneWidth(paneW, true); // 離したときに憶える
   };
   addEventListener('pointerup', end);

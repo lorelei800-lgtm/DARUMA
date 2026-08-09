@@ -340,31 +340,31 @@ code {
 @media (min-width: 560px) and (min-height: 560px) {
   .shell {
     display: grid;
-    /* 中央の 1px が仕切り。幅は JS が --pane-w に入れる */
-    grid-template-columns: var(--pane-w, 360px) 1px 1fr;
+    /*
+     * 仕切りは実体として太い列を持たせる（--split-w）。
+     * 見た目の線は背景のグラデーションで中央に描く。
+     *
+     * 以前は 1px の列＋擬似要素の張り出しで当たり判定を作っていたが、
+     * Chrome のタッチ補正が隣の広いスクロール領域（一覧）を優先してしまい、
+     * 指では掴めなかった。当たり判定は実体の幅で取ること。
+     */
+    grid-template-columns: var(--pane-w, 360px) var(--split-w, 14px) 1fr;
     height: 100dvh;
   }
 
   .splitter {
     display: block;
     position: relative;
-    background: var(--line);
     cursor: col-resize;
     /* ドラッグ中にページがスクロールしないようにする */
     touch-action: none;
     -webkit-user-select: none;
     user-select: none;
-  }
-
-  /* 指で掴めるよう、見た目の線より広い当たり判定を左右に張り出させる */
-  .splitter::before {
-    content: "";
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: -11px;
-    right: -11px;
-    z-index: 5;
+    /* 中央に 1px の線を描く。列そのものは太いまま */
+    background:
+      linear-gradient(to right, transparent calc(50% - 0.5px), var(--line) calc(50% - 0.5px),
+                      var(--line) calc(50% + 0.5px), transparent calc(50% + 0.5px));
+    transition: background-color .15s var(--ease);
   }
 
   /* つまみ。掴めることが分かるように */
@@ -373,21 +373,45 @@ code {
     position: absolute;
     top: 50%;
     left: 50%;
-    width: 4px;
-    height: 48px;
+    width: 5px;
+    height: 56px;
     transform: translate(-50%, -50%);
     border-radius: 999px;
     background: var(--muted);
-    opacity: .45;
-    z-index: 6;
+    opacity: .6;
     pointer-events: none;
     transition: background .15s var(--ease), opacity .15s var(--ease), height .15s var(--ease);
   }
 
-  .splitter:hover::after { opacity: .8; }
-  .splitter:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
-  .splitter.dragging { background: var(--accent); }
-  .splitter.dragging::after { background: var(--accent); opacity: 1; height: 72px; }
+  .splitter:hover::after { opacity: .9; }
+  .splitter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .splitter.dragging { background-color: var(--accent-weak); }
+  .splitter.dragging::after { background: var(--accent); opacity: 1; height: 88px; }
+
+  /* 指で操作する端末では、さらに太くする */
+  @media (pointer: coarse) {
+    .shell { --split-w: 22px; }
+    .splitter::after { width: 6px; height: 64px; }
+  }
+
+  /* ドラッグ中に今の幅を出す。効いていることが分かるように */
+  .splitter-hint {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) translateY(-58px);
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font: 600 11px/1 var(--mono);
+    white-space: nowrap;
+    pointer-events: none;
+    /* 表示・非表示は JS が直接切り替える（クラス依存にすると取りこぼした） */
+    opacity: 0;
+    transition: opacity .12s var(--ease);
+    z-index: 3;
+  }
 
   /* 2ペインのときは、片方を隠す JS の指定より横並びを優先する */
   #listView[hidden],
