@@ -320,6 +320,69 @@ code {
   word-break: break-all;
 }
 
+/* --------------------------------------------------------- ノート */
+
+.note-group-head {
+  display: flex;
+  gap: 11px;
+  align-items: center;
+  padding: 14px 16px 8px;
+}
+.note-group-head img {
+  width: 88px;
+  height: 50px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--surface-2);
+}
+.note-group-head .ngt {
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.note-group-head .ngm { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+
+.note-card {
+  margin: 0 16px 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+}
+.note-card .nq { font-size: 14px; line-height: 1.7; color: var(--fg); }
+.note-card .nm {
+  margin-top: 8px;
+  padding: 8px 11px;
+  background: var(--surface-2);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--fg-soft);
+  white-space: pre-wrap;
+}
+.note-card .nf {
+  margin-top: 9px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.note-card .nf .ts {
+  display: inline-flex;
+  font: 600 11px/1 var(--mono);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--accent-weak);
+  color: var(--accent);
+  text-decoration: none;
+}
+
 /* --------------------------------------------------------- 大画面 */
 
 /*

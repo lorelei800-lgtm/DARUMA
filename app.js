@@ -10,6 +10,7 @@
  */
 
 const DATA_FILE = 'daruma-archive.json';
+const NOTES_FILE = 'daruma-notes.json';
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 
 const $ = (id) => document.getElementById(id);
@@ -18,6 +19,8 @@ let items = [];
 let term = '';
 let channel = '';
 let generatedAt = 0;
+let notesData = [];
+let noteTerm = '';
 let tokenClient = null;
 let accessToken = null;
 let tokenExpiresAt = 0;
@@ -472,6 +475,7 @@ function renderDetail(r) {
 
 function closeOverlay() {
   $('settingsView').hidden = true;
+  $('notesView').hidden = true;
   document.querySelector('.shell').hidden = false;
   // 一覧へ帰ったので、この後に折りたたんでも詳細を開き直さない。
   // 選択自体は残しておき、開いたときに右側へ出す。
@@ -556,6 +560,17 @@ async function driveFetch(url, token) {
   throw new Error(`Drive エラー ${res.status}。${msg.slice(0, 220)}`);
 }
 
+/** Drive から名前で JSON を1つ取得する。見つからなければ null。 */
+async function fetchDriveJson(token, name) {
+  const q = encodeURIComponent(`name = '${name}' and trashed = false`);
+  const listUrl =
+    `https://www.googleapis.com/drive/v3/files?q=${q}` +
+    `&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=3`;
+  const list = await (await driveFetch(listUrl, token)).json();
+  if (!list.files || !list.files.length) return null;
+  return (await driveFetch(`https://www.googleapis.com/drive/v3/files/${list.files[0].id}?alt=media`, token)).json();
+}
+
 async function pullFromDrive({ interactive = false } = {}) {
   const btn = $('refresh');
   btn.classList.add('spin');
@@ -563,24 +578,25 @@ async function pullFromDrive({ interactive = false } = {}) {
   try {
     const token = await getToken({ interactive });
 
-    const q = encodeURIComponent(`name = '${DATA_FILE}' and trashed = false`);
-    const listUrl =
-      `https://www.googleapis.com/drive/v3/files?q=${q}` +
-      `&fields=files(id,name,modifiedTime,size)&orderBy=modifiedTime desc&pageSize=5`;
-    const list = await (await driveFetch(listUrl, token)).json();
-
-    if (!list.files || !list.files.length) {
+    const data = await fetchDriveJson(token, DATA_FILE);
+    if (!data) {
       throw new Error(`${DATA_FILE} が Drive に見つかりません。PC 側で一度「Drive へ同期」してください。`);
     }
-
-    const file = list.files[0];
-    const data = await (
-      await driveFetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, token)
-    ).json();
-
     await idb.set('archive', data);
     lastPullAt = Date.now();
     applyData(data);
+
+    // ノートは無くてもエラーにしない（要約より後から使い始める機能なので）
+    try {
+      const nd = await fetchDriveJson(token, NOTES_FILE);
+      if (nd) {
+        await idb.set('notes', nd);
+        applyNotes(nd);
+      }
+    } catch (_) {
+      /* ノート取得の失敗は要約の取り込みを妨げない */
+    }
+
     setStatus($('status'), `${items.length} 件を取り込みました（${fmtDate(generatedAt)} 時点）`);
     setTimeout(() => setStatus($('status'), ''), 4000);
   } catch (e) {
@@ -601,6 +617,97 @@ function applyData(data) {
   );
 }
 
+/* ------------------------------------------------------------ ノート */
+
+function applyNotes(nd) {
+  notesData = (nd?.notes || []).slice();
+  if (!$('notesView').hidden) renderNotes();
+}
+
+function filteredNotes() {
+  const q = normNote(noteTerm);
+  if (!q) return notesData;
+  return notesData.filter((n) => normNote(`${n.text} ${n.memo} ${n.videoTitle} ${n.channel}`).includes(q));
+}
+
+const normNote = (s) =>
+  String(s || '').normalize('NFKC').toLowerCase().replace(/[\s・･、。,.\-‐−–—_]/g, '');
+
+const mmssN = (sec) => {
+  if (sec == null) return '';
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+};
+
+function renderNotes() {
+  const box = $('noteList');
+  box.replaceChildren();
+  const rows = filteredNotes();
+
+  if (!notesData.length) {
+    box.appendChild(el('div', 'empty', 'まだノートがありません。PC の拡張機能で要約の文章を選ぶと追加できます。'));
+    return;
+  }
+  if (!rows.length) {
+    box.appendChild(el('div', 'empty', '該当なし'));
+    return;
+  }
+
+  const byVideo = new Map();
+  for (const n of rows) {
+    if (!byVideo.has(n.videoId)) byVideo.set(n.videoId, []);
+    byVideo.get(n.videoId).push(n);
+  }
+
+  for (const [videoId, group] of byVideo) {
+    const head = el('div', 'note-group-head');
+    const img = document.createElement('img');
+    img.src = group[0].thumb || `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
+    img.alt = '';
+    img.loading = 'lazy';
+    const meta = el('div');
+    meta.appendChild(el('div', 'ngt', group[0].videoTitle || videoId));
+    meta.appendChild(el('div', 'ngm', [group[0].channel, `${group.length} 件`].filter(Boolean).join(' · ')));
+    head.append(img, meta);
+    box.appendChild(head);
+
+    for (const n of group) {
+      const card = el('div', 'note-card');
+      card.appendChild(el('div', 'nq', n.text));
+      if (n.memo) card.appendChild(el('div', 'nm', n.memo));
+      const foot = el('div', 'nf');
+      if (n.timestampSec != null) {
+        const a = document.createElement('a');
+        a.className = 'ts';
+        a.textContent = mmssN(n.timestampSec);
+        a.href = `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(n.timestampSec)}s`;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        foot.appendChild(a);
+      }
+      foot.appendChild(el('span', null, fmtDate(n.createdAt)));
+      card.appendChild(foot);
+      box.appendChild(card);
+    }
+  }
+}
+
+function openNotes() {
+  document.querySelector('.shell').hidden = true;
+  $('settingsView').hidden = true;
+  $('notesView').hidden = false;
+  renderNotes();
+  history.pushState({ view: 'notes' }, '');
+}
+
+$('openNotes').addEventListener('click', openNotes);
+$('closeNotes').addEventListener('click', () => history.back());
+$('noteQ').addEventListener('input', (e) => {
+  noteTerm = e.target.value;
+  renderNotes();
+});
+
 /* ------------------------------------------------------------ 設定 */
 
 function openSettings() {
@@ -609,6 +716,7 @@ function openSettings() {
   renderDiag();
   // 設定は 2ペインでも全画面で出す
   document.querySelector('.shell').hidden = true;
+  $('notesView').hidden = true;
   $('settingsView').hidden = false;
   history.pushState({ view: 'settings' }, '');
 }
@@ -711,6 +819,8 @@ $('q').addEventListener('input', (e) => {
   const cached = await idb.get('archive').catch(() => null);
   if (cached) applyData(cached);
   else renderList();
+  const cachedNotes = await idb.get('notes').catch(() => null);
+  if (cachedNotes) applyNotes(cachedNotes);
   applyLayout();
 
   if (!LS.clientId) {

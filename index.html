@@ -18,6 +18,7 @@
         <img class="mark" src="icons/icon-192.png" alt="" />
         <span class="title">DARUMA</span>
         <span class="spacer"></span>
+        <button id="openNotes" class="icon-btn" title="ノート" aria-label="ノート">📝</button>
         <button id="refresh" class="icon-btn" title="Drive から取り込む" aria-label="更新">⟳</button>
         <button id="openSettings" class="icon-btn" title="設定" aria-label="設定">⚙</button>
       </header>
@@ -52,6 +53,18 @@
       <main id="detail" class="detail-body"></main>
     </div>
     </div><!-- /.shell -->
+
+    <!-- ------------------------------------------------ ノート -->
+    <div id="notesView" class="view" hidden>
+      <header class="top">
+        <button id="closeNotes" class="icon-btn" aria-label="戻る">‹</button>
+        <span class="title">ノート</span>
+      </header>
+      <div class="searchbar">
+        <input id="noteQ" type="search" placeholder="ハイライト・メモ・動画名を検索" autocomplete="off" />
+      </div>
+      <main id="noteList" class="list"></main>
+    </div>
 
     <!-- ------------------------------------------------ 設定 -->
     <div id="settingsView" class="view" hidden>
