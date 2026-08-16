@@ -8,18 +8,22 @@
 
 // 版番号を上げると、次に開いたときに新しいシェルを取り直す。
 // アプリ本体を変えたら必ず上げること。
-const CACHE = 'daruma-shell-v8';
+const CACHE = 'daruma-shell-v9';
 const SHELL = [
   './',
   './index.html',
   './app.js',
   './summarize.js',
   './styles.css',
-  './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-180.png',
 ];
+
+// manifest.webmanifest は絶対にキャッシュしないこと。
+// ここに入れると、ブラウザがインストール時に読む manifest が古いまま固定され、
+// share_target を足しても共有先に出ない、といった「更新したのに反映されない」
+// 不具合になる。実際にそれで詰まった。
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -40,6 +44,10 @@ self.addEventListener('fetch', (e) => {
   // 自分のオリジン以外（Google 認証・Drive API・サムネイル）は素通し。
   if (url.origin !== self.location.origin) return;
   if (e.request.method !== 'GET') return;
+
+  // manifest はブラウザがインストール判断に使う。常に取りに行かせる。
+  // 一度でも古いものを返すと、インストール済みアプリがその内容で固定される。
+  if (url.pathname.endsWith('.webmanifest')) return;
 
   // 共有シートから起動されると "./?text=..." のように付いてくる。
   // クエリまで一致を求めるとキャッシュに当たらず、オフラインで真っ白になる。
