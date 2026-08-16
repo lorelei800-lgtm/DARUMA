@@ -18,7 +18,15 @@ import { parseVideoId, streamSummary, fetchOEmbed, firstBullet } from './summari
 
 const DATA_FILE = 'daruma-archive.json';
 const NOTES_FILE = 'daruma-notes.json';
-const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+// スマホで作った要約はこの別ファイルに書く。PC が書く daruma-archive.json を
+// 両側から書くと衝突するので、書き手を1つに保ったまま合流させる。
+const MOBILE_FILE = 'daruma-mobile.json';
+// drive.file は「このアプリが作ったファイル」だけを扱える権限。
+// Drive 全体への書き込み権限は要らない。
+const SCOPE = [
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.file',
+].join(' ');
 const DEFAULT_MODEL = 'gemini-3.6-flash';
 
 const $ = (id) => document.getElementById(id);
@@ -618,14 +626,97 @@ async function driveFetch(url, token) {
 }
 
 /** Drive から名前で JSON を1つ取得する。見つからなければ null。 */
-async function fetchDriveJson(token, name) {
+/** 名前でファイルを1つ探す。見つからなければ null。 */
+async function findDriveFile(token, name, fields = 'id,name,modifiedTime') {
   const q = encodeURIComponent(`name = '${name}' and trashed = false`);
   const listUrl =
     `https://www.googleapis.com/drive/v3/files?q=${q}` +
-    `&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=3`;
+    `&fields=files(${fields})&orderBy=modifiedTime desc&pageSize=3`;
   const list = await (await driveFetch(listUrl, token)).json();
-  if (!list.files || !list.files.length) return null;
-  return (await driveFetch(`https://www.googleapis.com/drive/v3/files/${list.files[0].id}?alt=media`, token)).json();
+  return list.files && list.files.length ? list.files[0] : null;
+}
+
+async function fetchDriveJson(token, name) {
+  const f = await findDriveFile(token, name);
+  if (!f) return null;
+  return (await driveFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, token)).json();
+}
+
+/* --------------------------------------------- スマホ→PC の書き戻し */
+
+/**
+ * 端末で作った要約を daruma-mobile.json として Drive に上げる。
+ *
+ * 置き場所は daruma-archive.json と同じフォルダにする。そこは PC の Drive
+ * デスクトップ版が同期しているフォルダなので、上げれば PC のローカルにも降りてくる。
+ * 拡張機能はそれを読んで取り込む（別のアカウント連携を増やさずに済む）。
+ */
+/**
+ * アップロード系は driveFetch（GET 用）を通さないので、失敗をここで解釈する。
+ * 権限不足は「再連携すれば直る」ことが分からないと詰むので、必ずそう伝える。
+ */
+async function checkUpload(res) {
+  if (res.ok) return;
+  let msg = '';
+  try {
+    msg = (await res.json())?.error?.message || '';
+  } catch {
+    /* JSON でないこともある */
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new Error(
+      '書き込みの権限がありません。設定から「Google と連携する」を押し直して、追加の許可を与えてください。'
+    );
+  }
+  throw new Error(`Drive への書き込みに失敗 (${res.status}) ${msg.slice(0, 160)}`);
+}
+
+async function pushMobileToDrive() {
+  if (!mobileItems.length) return null;
+  if (!LS.clientId) return null; // Google 連携そのものが未設定。要約は端末に残る。
+  const token = await getToken({ interactive: false });
+
+  const payload = JSON.stringify({
+    version: 1,
+    generatedAt: Date.now(),
+    device: 'mobile',
+    count: mobileItems.length,
+    // 生成途中や失敗したものは送らない。PC 側に半端な要約を混ぜない。
+    items: mobileItems.filter((r) => r.status === 'done' && r.quick),
+  });
+
+  const existing = await findDriveFile(token, MOBILE_FILE, 'id,name');
+  if (existing) {
+    // 中身だけ差し替える。作り直すと ID が変わり、PC 側で重複して見える。
+    const res = await fetch(
+      `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: payload,
+      }
+    );
+    await checkUpload(res);
+    return 'updated';
+  }
+
+  // 初回。PC が読んでいるフォルダと同じ場所に作る。
+  const archive = await findDriveFile(token, DATA_FILE, 'id,parents');
+  const parents = archive?.parents || [];
+  const boundary = 'daruma' + Math.random().toString(36).slice(2);
+  const meta = { name: MOBILE_FILE, mimeType: 'application/json', ...(parents.length ? { parents } : {}) };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n` +
+    `--${boundary}--`;
+
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  await checkUpload(res);
+  return parents.length ? 'created' : 'created-in-root';
 }
 
 async function pullFromDrive({ interactive = false } = {}) {
@@ -784,6 +875,17 @@ async function runSummarize(input) {
     await saveMobileItems();
     recomputeItems();
     if (selectedId === videoId) renderDetail(rec);
+  }
+
+  // 端末に保存できた後で PC へ送る。ここが失敗しても要約は手元に残っているので、
+  // 要約そのものを失敗扱いにはしない。
+  if (rec.status === 'done') {
+    try {
+      await pushMobileToDrive();
+      setStatus($('status'), 'PC にも送りました');
+    } catch (e) {
+      setStatus($('status'), `PC への送信は失敗しました（要約は端末に保存済み）: ${e.message}`, true);
+    }
   }
 }
 
