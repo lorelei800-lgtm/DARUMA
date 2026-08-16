@@ -1,21 +1,33 @@
 /*
- * DARUMA PWA — Drive に置かれた要約アーカイブをスマホで読む。
+ * DARUMA PWA — 要約を読み、スマホからも要約する。
  *
- * データの流れ:
- *   拡張機能（PC） → Drive デスクトップ版の同期フォルダ → Drive クラウド
- *     → この PWA が Drive API で daruma-archive.json を読む → 端末にキャッシュ
+ * データの流れは2本ある:
+ *   1. 読む: 拡張機能（PC） → Drive デスクトップ版の同期フォルダ → Drive クラウド
+ *        → この PWA が Drive API で daruma-archive.json を読む → 端末にキャッシュ
+ *   2. 作る: YouTube アプリの共有 → この PWA → Gemini に動画URLを直接渡す
+ *        → 結果は端末内（IndexedDB）に置く
  *
- * サーバーは持たない。このページは静的ファイルで、要約データは Drive から
- * 直接ブラウザに入る（どこかのサーバーを経由しない）。
+ * サーバーは持たない。このページは静的ファイルで、Drive も Gemini も
+ * ブラウザから直接叩く（どこかのサーバーを経由しない）。
+ *
+ * 2 で作った分は端末内に留まり、Drive へは書き戻していない。
+ * 同じファイルを PC と両方から書くと衝突するため、その設計は別途行う。
  */
+
+import { parseVideoId, streamSummary, fetchOEmbed, firstBullet } from './summarize.js';
 
 const DATA_FILE = 'daruma-archive.json';
 const NOTES_FILE = 'daruma-notes.json';
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+const DEFAULT_MODEL = 'gemini-3.6-flash';
 
 const $ = (id) => document.getElementById(id);
 
 let items = [];
+// Drive から取り込んだ分と、この端末で要約した分は別々に持つ。
+// 混ぜて1つにすると、Drive を取り込み直したときに端末側の要約が消える。
+let driveItems = [];
+let mobileItems = [];
 let term = '';
 let channel = '';
 let generatedAt = 0;
@@ -33,6 +45,19 @@ const LS = {
   },
   set clientId(v) {
     localStorage.setItem('daruma.clientId', v);
+  },
+  // Gemini のキーはこの端末から出さない。送り先は Gemini API だけ。
+  get apiKey() {
+    return localStorage.getItem('daruma.apiKey') || '';
+  },
+  set apiKey(v) {
+    localStorage.setItem('daruma.apiKey', v);
+  },
+  get model() {
+    return localStorage.getItem('daruma.model') || DEFAULT_MODEL;
+  },
+  set model(v) {
+    localStorage.setItem('daruma.model', v || DEFAULT_MODEL);
   },
 };
 
@@ -218,7 +243,11 @@ function renderList() {
 
   if (!items.length) {
     box.appendChild(
-      el('div', 'empty', 'まだデータがありません。設定から Google と連携し、更新してください。')
+      el(
+        'div',
+        'empty',
+        'まだ要約がありません。上に YouTube の URL を貼るか、YouTube アプリの共有から DARUMA を選んでください。PC で作った要約を読むには、設定から Google と連携します。'
+      )
     );
     return;
   }
@@ -237,7 +266,14 @@ function renderList() {
     const body = el('div');
     body.appendChild(el('div', 't', r.title || r.videoId));
     const meta = el('div', 'm');
-    for (const bit of [r.channel, fmtDur(r.durationSec), fmtDate(r.updatedAt), r.deep ? '深掘り済' : null].filter(Boolean)) {
+    const working = r.status === 'streaming' || r.status === 'starting';
+    for (const bit of [
+      r.channel,
+      fmtDur(r.durationSec),
+      working ? '要約中…' : fmtDate(r.updatedAt),
+      r.error ? '失敗' : null,
+      r.deep ? '深掘り済' : null,
+    ].filter(Boolean)) {
       meta.appendChild(el('span', null, bit));
     }
     body.appendChild(meta);
@@ -469,8 +505,29 @@ function renderDetail(r) {
   }
   box.appendChild(bar);
 
+  if (r.error) {
+    box.appendChild(el('div', 'empty', r.error));
+  }
+
   const text = detailTier === 'deep' ? r.deep || r.quick : r.quick || r.deep;
-  box.appendChild(renderMarkdown(text, r.videoId));
+  const body = renderMarkdown(text, r.videoId);
+  box.appendChild(body);
+  // 生成中はここだけ差し替える。全体を作り直すとスクロール位置が飛ぶ。
+  streamBodyNode = body;
+
+  if (r.status === 'streaming' || r.status === 'starting') {
+    box.appendChild(el('div', 'status', r.status === 'starting' ? '動画を読み込んでいます…' : '要約中…'));
+  }
+}
+
+// 生成中の本文ノード。renderDetail が張り替えるたびに更新する。
+let streamBodyNode = null;
+
+function updateStreamBody(r) {
+  if (!streamBodyNode || selectedId !== r.videoId) return;
+  const next = renderMarkdown(r.quick, r.videoId);
+  streamBodyNode.replaceWith(next);
+  streamBodyNode = next;
 }
 
 function closeOverlay() {
@@ -606,15 +663,151 @@ async function pullFromDrive({ interactive = false } = {}) {
   }
 }
 
-function applyData(data) {
-  items = (data?.items || []).slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  generatedAt = data?.generatedAt || 0;
+/**
+ * Drive 由来と端末由来をひとつの一覧にまとめ直す。
+ * 同じ動画が両方にある場合は新しい方を採る。
+ */
+function recomputeItems() {
+  const map = new Map();
+  for (const r of driveItems) map.set(r.videoId, r);
+  for (const r of mobileItems) {
+    const cur = map.get(r.videoId);
+    if (!cur || (r.updatedAt || 0) >= (cur.updatedAt || 0)) map.set(r.videoId, r);
+  }
+  items = [...map.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   renderChannels();
   renderList();
+}
+
+function applyData(data) {
+  driveItems = (data?.items || []).slice();
+  generatedAt = data?.generatedAt || 0;
+  recomputeItems();
   setStatus(
     $('dataStatus'),
-    items.length ? `${items.length} 件 / 取り込み日時 ${fmtDate(generatedAt)}` : 'まだ取り込んでいません'
+    driveItems.length
+      ? `${driveItems.length} 件 / 取り込み日時 ${fmtDate(generatedAt)}`
+      : 'まだ取り込んでいません'
   );
+}
+
+/* ------------------------------------------------- スマホ側での要約 */
+
+let summarizing = false;
+
+async function saveMobileItems() {
+  await idb.set('mobile', mobileItems).catch(() => {});
+}
+
+function upsertMobile(rec) {
+  const i = mobileItems.findIndex((x) => x.videoId === rec.videoId);
+  if (i >= 0) mobileItems[i] = rec;
+  else mobileItems.unshift(rec);
+}
+
+/**
+ * 動画URL（または動画ID）を受け取って要約する。
+ * 字幕は使わず、Gemini に動画そのものを読ませる（summarize.js の説明を参照）。
+ */
+async function runSummarize(input) {
+  const videoId = parseVideoId(input);
+  if (!videoId) {
+    setStatus($('status'), 'YouTube の動画URLとして読み取れませんでした', true);
+    return;
+  }
+  if (summarizing) {
+    setStatus($('status'), '別の要約を実行中です。終わるまでお待ちください', true);
+    return;
+  }
+  if (!LS.apiKey) {
+    setStatus($('status'), '設定から Gemini API キーを登録してください', true);
+    openSettings();
+    return;
+  }
+
+  summarizing = true;
+  closeOverlay();
+
+  // 先に器を作って画面に出す。待たされている間、何が起きているか見えるようにする。
+  const rec = {
+    videoId,
+    title: '',
+    channel: '',
+    durationSec: null,
+    quick: '',
+    deep: '',
+    headline: '',
+    model: LS.model,
+    source: 'video-native',
+    updatedAt: Date.now(),
+    status: 'starting',
+    error: null,
+  };
+  upsertMobile(rec);
+  recomputeItems();
+  openDetail(rec);
+
+  // タイトルは要約に必須ではないので、取れなくても止めない。
+  fetchOEmbed(videoId).then((meta) => {
+    if (!meta) return;
+    rec.title = meta.title;
+    rec.channel = meta.channel;
+    recomputeItems();
+    if (selectedId === videoId) renderDetail(rec);
+  });
+
+  try {
+    for await (const ev of streamSummary({ apiKey: LS.apiKey, model: LS.model, videoId })) {
+      if (ev.text) {
+        if (rec.status !== 'streaming') {
+          rec.status = 'streaming';
+          renderDetail(rec);
+        }
+        rec.quick += ev.text;
+        updateStreamBody(rec);
+      }
+      if (ev.warning) setStatus($('status'), ev.warning, true);
+    }
+    rec.status = 'done';
+    rec.headline = firstBullet(rec.quick);
+    rec.updatedAt = Date.now();
+    if (!rec.quick.trim()) {
+      rec.error = '要約が空でした。もう一度お試しください。';
+      rec.status = 'error';
+    }
+  } catch (e) {
+    rec.status = 'error';
+    rec.error = e.message;
+  } finally {
+    summarizing = false;
+    upsertMobile(rec);
+    await saveMobileItems();
+    recomputeItems();
+    if (selectedId === videoId) renderDetail(rec);
+  }
+}
+
+$('summarizeBtn').addEventListener('click', () => {
+  const v = $('ytUrl').value.trim();
+  if (v) {
+    $('ytUrl').value = '';
+    runSummarize(v);
+  }
+});
+$('ytUrl').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('summarizeBtn').click();
+});
+
+/**
+ * 共有シートから起動されたときは URL にパラメータが乗ってくる。
+ * 読み取ったら履歴から消す。残しておくと、再読み込みのたびに要約が走ってしまう。
+ */
+function sharedTarget() {
+  const p = new URLSearchParams(location.search);
+  const raw = [p.get('url'), p.get('text'), p.get('title')].filter(Boolean).join('\n');
+  if (!raw) return null;
+  history.replaceState(null, '', location.pathname);
+  return parseVideoId(raw);
 }
 
 /* ------------------------------------------------------------ ノート */
@@ -713,6 +906,8 @@ $('noteQ').addEventListener('input', (e) => {
 function openSettings() {
   $('originHint').textContent = location.origin;
   $('clientId').value = LS.clientId;
+  $('apiKey').value = LS.apiKey;
+  $('mobileModel').value = LS.model;
   renderDiag();
   // 設定は 2ペインでも全画面で出す
   document.querySelector('.shell').hidden = true;
@@ -727,6 +922,18 @@ $('saveClientId').addEventListener('click', () => {
   LS.clientId = $('clientId').value.trim();
   tokenClient = null; // 作り直させる
   setStatus($('authStatus'), '保存しました。「Google と連携する」を押してください。');
+});
+
+$('saveApiKey').addEventListener('click', () => {
+  LS.apiKey = $('apiKey').value.trim();
+  LS.model = $('mobileModel').value.trim();
+  setStatus(
+    $('apiKeyStatus'),
+    LS.apiKey
+      ? `保存しました（モデル: ${LS.model}）。YouTube の共有から DARUMA を選べます。`
+      : 'キーを空にしました。スマホ側での要約はできません。',
+    !LS.apiKey
+  );
 });
 
 $('signIn').addEventListener('click', async () => {
@@ -751,14 +958,20 @@ $('signOut').addEventListener('click', () => {
 });
 
 $('clearCache').addEventListener('click', async () => {
+  // 消すのは Drive から取り込んだ分だけ。
+  // この端末で作った要約は Drive に無いので、消すと取り返しがつかない。
   await idb.set('archive', null);
-  items = [];
+  driveItems = [];
   generatedAt = 0;
   selectedId = null;
-  renderChannels();
-  renderList();
+  recomputeItems();
   applyLayout();
-  setStatus($('dataStatus'), '取り込んだ要約を消しました');
+  setStatus(
+    $('dataStatus'),
+    mobileItems.length
+      ? `取り込んだ要約を消しました（この端末で作った ${mobileItems.length} 件は残しています）`
+      : '取り込んだ要約を消しました'
+  );
 });
 
 /*
@@ -814,14 +1027,31 @@ $('q').addEventListener('input', (e) => {
 /* ------------------------------------------------------------ 起動 */
 
 (async () => {
+  // 共有シート由来かどうかは、他の処理より先に確かめて URL から消しておく。
+  // 消す前に他の非同期処理が走ると、再読み込み扱いで二重に要約しかねない。
+  const shared = sharedTarget();
+
   // まずキャッシュを出す。オフラインでもすぐ読める状態にしてから通信する。
   initSplitter();
   const cached = await idb.get('archive').catch(() => null);
   if (cached) applyData(cached);
-  else renderList();
+  mobileItems = (await idb.get('mobile').catch(() => null)) || [];
+  // 前回の生成中に画面を閉じた分が「要約中」のまま残らないようにする。
+  for (const r of mobileItems) {
+    if (r.status === 'streaming' || r.status === 'starting') {
+      r.status = r.quick ? 'done' : 'error';
+      if (!r.quick) r.error = '前回の要約は完了しませんでした。もう一度お試しください。';
+    }
+  }
+  recomputeItems();
   const cachedNotes = await idb.get('notes').catch(() => null);
   if (cachedNotes) applyNotes(cachedNotes);
   applyLayout();
+
+  if (shared) {
+    runSummarize(shared);
+    return; // 共有から来たときは要約が主目的。Drive の取り込みは後回しでよい。
+  }
 
   if (!LS.clientId) {
     setStatus($('status'), '設定から OAuth クライアント ID を登録してください');

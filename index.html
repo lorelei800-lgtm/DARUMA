@@ -27,6 +27,13 @@
         <input id="q" type="search" placeholder="タイトル・チャンネル・本文を検索" autocomplete="off" />
       </div>
 
+      <!-- YouTube アプリの共有シートから渡された URL をここで受ける。
+           手で貼り付けても使えるようにしておく（共有が使えない場面の逃げ道）。 -->
+      <div class="summarize-bar">
+        <input id="ytUrl" type="url" inputmode="url" placeholder="YouTube の URL を貼って要約" autocomplete="off" />
+        <button id="summarizeBtn" class="btn primary">要約</button>
+      </div>
+
       <div id="chans" class="chips"></div>
       <div id="status" class="status"></div>
       <main id="list" class="list"></main>
@@ -73,6 +80,28 @@
         <span class="title">設定</span>
       </header>
       <main class="settings">
+        <section>
+          <h2>スマホで要約する</h2>
+          <label for="apiKey">Gemini API キー</label>
+          <input id="apiKey" type="password" spellcheck="false" autocomplete="off" placeholder="AIza..." />
+          <label for="mobileModel">モデル</label>
+          <input id="mobileModel" type="text" spellcheck="false" placeholder="gemini-3.6-flash" />
+          <p class="hint">
+            キーはこの端末の中だけに保存され、Gemini 以外へは送られません。
+            スマホには字幕を取る仕組み（PC版のローカルヘルパー）が無いため、
+            <strong>動画そのものを Gemini に読ませます</strong>。
+            そのぶん PC 版よりトークンを多く使い、長い動画ほど時間と費用がかかります。
+          </p>
+          <div class="row">
+            <button id="saveApiKey" class="btn primary">保存</button>
+          </div>
+          <p id="apiKeyStatus" class="status"></p>
+          <p class="hint">
+            YouTube アプリの「共有」から DARUMA を選ぶと、その動画の要約が始まります。
+            共有先に出てこないときは、このアプリをホーム画面にインストールしてください。
+          </p>
+        </section>
+
         <section>
           <h2>Google 連携</h2>
           <label for="clientId">OAuth クライアント ID</label>

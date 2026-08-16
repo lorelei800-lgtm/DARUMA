@@ -1,9 +1,14 @@
 {
   "name": "DARUMA",
   "short_name": "DARUMA",
-  "description": "PCで作った要約アーカイブを、外出先で読む",
+  "description": "YouTube の動画を要約して読む。PCで作った要約も外出先で読める",
   "start_url": "./",
   "scope": "./",
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  },
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#fbfbfd",

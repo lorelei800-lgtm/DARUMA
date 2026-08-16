@@ -110,6 +110,28 @@ html, body {
 }
 .searchbar input:focus { outline: none; border-color: var(--accent); }
 
+/* URL を貼って要約する行。共有シートが使えない場面の逃げ道も兼ねる。 */
+.summarize-bar {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 4px 14px 8px;
+  background: var(--surface);
+}
+.summarize-bar input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 16px; /* iOS でズームさせないため 16px 以上 */
+  padding: 11px 15px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.summarize-bar input:focus { outline: none; border-color: var(--accent); }
+.summarize-bar .btn { flex: 0 0 auto; }
+
 .chips {
   flex: 0 0 auto;
   display: flex;

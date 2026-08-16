@@ -8,11 +8,12 @@
 
 // 版番号を上げると、次に開いたときに新しいシェルを取り直す。
 // アプリ本体を変えたら必ず上げること。
-const CACHE = 'daruma-shell-v7';
+const CACHE = 'daruma-shell-v8';
 const SHELL = [
   './',
   './index.html',
   './app.js',
+  './summarize.js',
   './styles.css',
   './manifest.webmanifest',
   './icons/icon-192.png',
@@ -40,12 +41,20 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return;
   if (e.request.method !== 'GET') return;
 
+  // 共有シートから起動されると "./?text=..." のように付いてくる。
+  // クエリまで一致を求めるとキャッシュに当たらず、オフラインで真っ白になる。
+  const opts = e.request.mode === 'navigate' ? { ignoreSearch: true } : undefined;
+
+  // 共有のたびに "./?text=<動画URL>" を別エントリとして貯め込まないようにする。
+  // 保存し直すのはクエリの無い本来のシェルだけでよい。
+  const cacheKey = url.search ? './index.html' : e.request;
+
   e.respondWith(
-    caches.match(e.request).then((hit) => {
+    caches.match(e.request, opts).then((hit) => {
       if (hit) {
         // 裏で更新しておく（次回の起動から新しくなる）
-        fetch(e.request)
-          .then((res) => res.ok && caches.open(CACHE).then((c) => c.put(e.request, res.clone())))
+        fetch(cacheKey)
+          .then((res) => res.ok && caches.open(CACHE).then((c) => c.put(cacheKey, res.clone())))
           .catch(() => {});
         return hit;
       }
