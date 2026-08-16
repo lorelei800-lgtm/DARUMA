@@ -222,7 +222,9 @@ function filtered() {
   return items.filter((r) => {
     if (channel && r.channel !== channel) return false;
     if (!t) return true;
-    return norm(`${r.title} ${r.channel} ${r.quick} ${r.deep}`).includes(t);
+    // 質問と回答も検索対象にする。「あの質問をした動画」を探せるように。
+    const chat = (r.chat || []).map((c) => `${c.q} ${c.a}`).join(' ');
+    return norm(`${r.title} ${r.channel} ${r.quick} ${r.deep} ${chat}`).includes(t);
   });
 }
 
@@ -520,6 +522,15 @@ function renderDetail(r) {
   const text = detailTier === 'deep' ? r.deep || r.quick : r.quick || r.deep;
   const body = renderMarkdown(text, r.videoId);
   box.appendChild(body);
+
+  // PC で交わした質問と回答。要約の下に続けて出す。
+  for (const turn of r.chat || []) {
+    const q = el('div', 'chat-q');
+    q.appendChild(el('span', 'chat-label', 'Q'));
+    q.appendChild(el('span', 'chat-qtext', turn.q));
+    box.appendChild(q);
+    if (turn.a) box.appendChild(renderMarkdown(turn.a, r.videoId));
+  }
   // 生成中はここだけ差し替える。全体を作り直すとスクロール位置が飛ぶ。
   streamBodyNode = body;
 
