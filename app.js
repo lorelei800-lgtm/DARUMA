@@ -168,7 +168,15 @@ const tsToSeconds = (ts) => {
   return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + p[1];
 };
 
+// **太字** を切り出し、残りでタイムスタンプを処理する（以前は記号のまま出ていた）。
 function appendInline(parent, text, videoId) {
+  text.split(/\*\*([^*\n]+?)\*\*/).forEach((part, i) => {
+    if (!part) return;
+    appendTimestamps(i % 2 ? parent.appendChild(document.createElement('strong')) : parent, part, videoId);
+  });
+}
+
+function appendTimestamps(parent, text, videoId) {
   let last = 0;
   text.replace(TS_RE, (match, ts, idx) => {
     if (idx > last) parent.appendChild(document.createTextNode(text.slice(last, idx)));
