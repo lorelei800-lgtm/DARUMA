@@ -97,8 +97,22 @@ html, body {
 
 /* --------------------------------------------------------- 検索 */
 
-.searchbar { flex: 0 0 auto; padding: 10px 14px 6px; background: var(--surface); }
+.searchbar { flex: 0 0 auto; display: flex; gap: 8px; padding: 10px 14px 6px; background: var(--surface); }
+/* 期間の選択。検索欄の隣に置いて、縦の場所を取らないようにする */
+.searchbar select {
+  flex: 0 0 auto;
+  max-width: 42%;
+  font: inherit;
+  font-size: 14px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+}
 .searchbar input {
+  flex: 1 1 auto;
+  min-width: 0;
   width: 100%;
   font: inherit;
   font-size: 16px; /* iOS でズームさせないため 16px 以上 */
@@ -179,6 +193,19 @@ html, body {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-bottom: calc(24px + var(--safe-bottom));
+}
+
+/* 月の見出し。一覧の上に貼り付くので、いまどの月を見ているかが常に分かる */
+.month {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
 }
 
 .row {

@@ -225,10 +225,62 @@ function renderMarkdown(md, videoId) {
 
 /* ------------------------------------------------------------ 一覧 */
 
+/*
+ * 期間で遡る（PC のアーカイブ画面と同じ考え方）。
+ * 千件を超えると、1本のリストをスクロールして遡るのは現実的でない。
+ * 日付は「要約した日」（createdAt）。updatedAt は質問するたびに進むので使わない。
+ */
+const summarizedAt = (r) => r.createdAt || r.updatedAt || 0;
+const monthKey = (ms) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+const monthLabel = (k) => `${k.slice(0, 4)}年${Number(k.slice(5))}月`;
+let period = '';
+
+function inPeriod(r) {
+  if (!period) return true;
+  const at = summarizedAt(r);
+  if (period === '7d') return at >= Date.now() - 7 * 864e5;
+  if (period === '30d') return at >= Date.now() - 30 * 864e5;
+  return monthKey(at) === period;
+}
+
+function renderPeriod() {
+  const sel = $('period');
+  const counts = new Map();
+  for (const r of items) {
+    const k = monthKey(summarizedAt(r));
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  const opt = (v, label) => {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = label;
+    return o;
+  };
+  // 選んでいた月が消えた（データを消した等）ときは「すべて」に戻す
+  if (period && period.length === 7 && !counts.has(period)) period = '';
+  sel.replaceChildren(
+    opt('', 'すべての期間'),
+    opt('7d', '直近7日'),
+    opt('30d', '直近30日'),
+    ...[...counts.keys()].sort().reverse().map((k) => opt(k, `${monthLabel(k)}（${counts.get(k)}）`))
+  );
+  sel.value = period;
+}
+
+$('period').addEventListener('change', (e) => {
+  period = e.target.value;
+  $('list').scrollTop = 0;
+  renderList();
+});
+
 function filtered() {
   const t = norm(term);
   return items.filter((r) => {
     if (channel && r.channel !== channel) return false;
+    if (!inPeriod(r)) return false;
     if (!t) return true;
     // 質問と回答も検索対象にする。「あの質問をした動画」を探せるように。
     const chat = (r.chat || []).map((c) => `${c.q} ${c.a}`).join(' ');
@@ -254,9 +306,13 @@ function renderChannels() {
   for (const n of names) box.appendChild(mk(n, n));
 }
 
+// スマホで千件を一度に描くと開くたびに重い。見える分から順に足していく。
+const CHUNK = 80;
+
 function renderList() {
   const box = $('list');
   box.replaceChildren();
+  box.onscroll = null;
   const rows = filtered();
 
   if (!items.length) {
@@ -274,7 +330,33 @@ function renderList() {
     return;
   }
 
-  for (const r of rows) {
+  const selIdx = selectedId ? rows.findIndex((r) => r.videoId === selectedId) : -1;
+  let shown = 0;
+  let lastMonth = null;
+  const appendUpTo = (n) => {
+    const end = Math.min(rows.length, n);
+    const frag = document.createDocumentFragment();
+    for (; shown < end; shown++) {
+      const r = rows[shown];
+      const m = monthKey(summarizedAt(r));
+      if (m !== lastMonth) {
+        lastMonth = m;
+        frag.appendChild(el('div', 'month', monthLabel(m)));
+      }
+      frag.appendChild(buildRow(r));
+    }
+    box.appendChild(frag);
+    if (shown >= rows.length) box.onscroll = null;
+  };
+  appendUpTo(Math.max(CHUNK, selIdx + 20));
+  if (shown < rows.length) {
+    box.onscroll = () => {
+      if (box.scrollTop + box.clientHeight > box.scrollHeight - 1200) appendUpTo(shown + CHUNK);
+    };
+  }
+}
+
+function buildRow(r) {
     const row = el('div', 'row');
     const img = document.createElement('img');
     img.src = `https://i.ytimg.com/vi/${r.videoId}/mqdefault.jpg`;
@@ -288,7 +370,7 @@ function renderList() {
     for (const bit of [
       r.channel,
       fmtDur(r.durationSec),
-      working ? '要約中…' : fmtDate(r.updatedAt),
+      working ? '要約中…' : fmtDate(summarizedAt(r)),
       r.error ? '失敗' : null,
       r.deep ? '深掘り済' : null,
     ].filter(Boolean)) {
@@ -301,8 +383,7 @@ function renderList() {
     row.setAttribute('aria-selected', String(selectedId === r.videoId));
     row.append(img, body);
     row.addEventListener('click', () => openDetail(r));
-    box.appendChild(row);
-  }
+    return row;
 }
 
 /* ------------------------------------------------------------ 詳細 */
@@ -784,8 +865,10 @@ function recomputeItems() {
     const cur = map.get(r.videoId);
     if (!cur || (r.updatedAt || 0) >= (cur.updatedAt || 0)) map.set(r.videoId, r);
   }
-  items = [...map.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  // 要約した日の新しい順（質問しただけの古い動画が先頭に来ないように）
+  items = [...map.values()].sort((a, b) => summarizedAt(b) - summarizedAt(a));
   renderChannels();
+  renderPeriod();
   renderList();
 }
 
