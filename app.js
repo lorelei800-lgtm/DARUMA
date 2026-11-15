@@ -276,15 +276,27 @@ $('period').addEventListener('change', (e) => {
   renderList();
 });
 
+// 検索用に整えた文字列は、要約ごとに一度だけ作って覚えておく。
+// 1文字打つたびに全要約（計 11MB）を整え直すと、スマホでは入力が引っかかる。
+// 質問と回答も対象にする（「あの質問をした動画」を探せるように）。
+const hayCache = new WeakMap();
+function haystack(r) {
+  let h = hayCache.get(r);
+  if (h === undefined) {
+    const chat = (r.chat || []).map((c) => `${c.q} ${c.a}`).join(' ');
+    h = norm(`${r.title} ${r.channel} ${r.quick || ''} ${r.deep || ''} ${chat}`);
+    hayCache.set(r, h);
+  }
+  return h;
+}
+
 function filtered() {
   const t = norm(term);
   return items.filter((r) => {
     if (channel && r.channel !== channel) return false;
     if (!inPeriod(r)) return false;
     if (!t) return true;
-    // 質問と回答も検索対象にする。「あの質問をした動画」を探せるように。
-    const chat = (r.chat || []).map((c) => `${c.q} ${c.a}`).join(' ');
-    return norm(`${r.title} ${r.channel} ${r.quick} ${r.deep} ${chat}`).includes(t);
+    return haystack(r).includes(t);
   });
 }
 
@@ -673,13 +685,23 @@ function ensureTokenClient() {
 function requestToken({ interactive }) {
   return new Promise((resolve, reject) => {
     const client = ensureTokenClient();
+    // Google 側が成功も失敗も知らせてこないことがある（確認画面が開けなかった等）。
+    // 待ち続けると「取り込んでいます…」のまま戻らなくなるので、時間で切る。
+    const timer = setTimeout(
+      () => reject(new Error('Google の認証が完了しませんでした。設定から「Google と連携する」を押し直してください。')),
+      interactive ? 180_000 : 45_000
+    );
     client.callback = (res) => {
+      clearTimeout(timer);
       if (res.error) return reject(new Error(res.error_description || res.error));
       accessToken = res.access_token;
       tokenExpiresAt = Date.now() + (Number(res.expires_in) || 3600) * 1000 - 60_000;
       resolve(accessToken);
     };
-    client.error_callback = (err) => reject(new Error(err?.message || '認証に失敗しました'));
+    client.error_callback = (err) => {
+      clearTimeout(timer);
+      reject(new Error(err?.message || '認証に失敗しました'));
+    };
     // 一度許可していれば prompt なしで通る。初回だけ同意画面が出る。
     client.requestAccessToken({ prompt: interactive ? 'consent' : '' });
   });
@@ -736,10 +758,24 @@ async function findDriveFile(token, name, fields = 'id,name,modifiedTime') {
   return list.files && list.files.length ? list.files[0] : null;
 }
 
-async function fetchDriveJson(token, name) {
-  const f = await findDriveFile(token, name);
-  if (!f) return null;
-  return (await driveFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, token)).json();
+/*
+ * 前回取り込んだときから変わっていなければ、ダウンロードしない。
+ *
+ * 要約ファイルは 11MB を超えている。アプリに戻るたびに丸ごと落とし直すと、
+ * 外出先では通信量を使い、表示も待たされる。先に Drive 上の指紋（md5）だけを見て、
+ * 同じなら手元の分をそのまま使う。
+ *
+ * 戻り値: { missing } / { unchanged } / { data, commit }。
+ * commit は端末への保存が済んでから呼ぶ（保存に失敗したのに「取り込み済み」と覚えないため）。
+ */
+const pulledKey = (name) => `daruma.pulled.${name}`;
+async function fetchDriveJsonIfChanged(token, name, { force = false } = {}) {
+  const f = await findDriveFile(token, name, 'id,name,modifiedTime,md5Checksum');
+  if (!f) return { missing: true };
+  const stamp = `${f.id}:${f.md5Checksum || f.modifiedTime}`;
+  if (!force && localStorage.getItem(pulledKey(name)) === stamp) return { unchanged: true };
+  const data = await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, token)).json();
+  return { data, commit: () => localStorage.setItem(pulledKey(name), stamp) };
 }
 
 /* --------------------------------------------- スマホ→PC の書き戻し */
@@ -826,26 +862,36 @@ async function pullFromDrive({ interactive = false } = {}) {
   try {
     const token = await getToken({ interactive });
 
-    const data = await fetchDriveJson(token, DATA_FILE);
-    if (!data) {
+    // 手元に何も無いときは、指紋が同じでも必ず落とす（端末のデータを消した後など）。
+    const arch = await fetchDriveJsonIfChanged(token, DATA_FILE, { force: !driveItems.length });
+    if (arch.missing) {
       throw new Error(`${DATA_FILE} が Drive に見つかりません。PC 側で一度「Drive へ同期」してください。`);
     }
-    await idb.set('archive', data);
     lastPullAt = Date.now();
-    applyData(data);
+    if (!arch.unchanged) {
+      await idb.set('archive', arch.data);
+      arch.commit();
+      applyData(arch.data);
+    }
 
     // ノートは無くてもエラーにしない（要約より後から使い始める機能なので）
     try {
-      const nd = await fetchDriveJson(token, NOTES_FILE);
-      if (nd) {
-        await idb.set('notes', nd);
-        applyNotes(nd);
+      const notes = await fetchDriveJsonIfChanged(token, NOTES_FILE);
+      if (notes.data) {
+        await idb.set('notes', notes.data);
+        notes.commit();
+        applyNotes(notes.data);
       }
     } catch (_) {
       /* ノート取得の失敗は要約の取り込みを妨げない */
     }
 
-    setStatus($('status'), `${items.length} 件を取り込みました（${fmtDate(generatedAt)} 時点）`);
+    setStatus(
+      $('status'),
+      arch.unchanged
+        ? `最新です（${items.length} 件・${fmtDate(generatedAt)} 時点）`
+        : `${items.length} 件を取り込みました（${fmtDate(generatedAt)} 時点）`
+    );
     setTimeout(() => setStatus($('status'), ''), 4000);
   } catch (e) {
     setStatus($('status'), e.message, true);
@@ -973,6 +1019,7 @@ async function runSummarize(input) {
     rec.error = e.message;
   } finally {
     summarizing = false;
+    hayCache.delete(rec); // 本文が入ったので、検索用の文字列を作り直させる
     upsertMobile(rec);
     await saveMobileItems();
     recomputeItems();
@@ -1165,6 +1212,9 @@ $('clearCache').addEventListener('click', async () => {
   // 消すのは Drive から取り込んだ分だけ。
   // この端末で作った要約は Drive に無いので、消すと取り返しがつかない。
   await idb.set('archive', null);
+  // 「取り込み済み」の覚えも消す。残すと、次の取り込みで「変わっていない」と判断して
+  // 何も落とさず、消したまま戻らなくなる。
+  localStorage.removeItem(pulledKey(DATA_FILE));
   driveItems = [];
   generatedAt = 0;
   selectedId = null;
