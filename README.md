@@ -4,11 +4,16 @@
 
 ```
 読む: 拡張機能(PC) → Drive デスクトップ版の同期フォルダ → Drive クラウド
-        → この PWA が Drive API で daruma-archive.json を読む → 端末にキャッシュ
+        → この PWA が Drive API で daruma-index.json と月ごとのファイルを読む → 端末にキャッシュ
 
 作る: YouTube アプリの「共有」→ この PWA → Gemini に動画URLを直接渡す
         → 結果は端末内（IndexedDB）に置く
 ```
+
+PC の拡張機能（v0.13.0〜）は要約を「要約した月」ごとのファイルに分けて書く。
+PWA は目次（`daruma-index.json`）を見て、**指紋（md5）が変わった月のファイルだけ**を落とし、
+月ごとに端末へ覚える。1件増えても落とすのは今月分（数 MB）だけで済む。
+目次が無ければ（PC が v0.12.0 まで）、全件入りの `daruma-archive.json` を読む。
 
 **サーバーを持たない。** このリポジトリにあるのは静的ファイルだけで、要約データは
 各自の Drive から直接ブラウザに入る。どこかのサーバーに保存されることはない。
@@ -58,15 +63,15 @@ Drive 由来の分だけを消す。
 ### PC への書き戻し
 
 端末で作った要約は **`daruma-mobile.json`** として Drive に上げる。
-PC が書く `daruma-archive.json` とはファイルを分けてある。
+PC が書く要約ファイル（`daruma-index.json` と `daruma-YYYY-MM.json`）とはファイルを分けてある。
 **1つのファイルには書き手を1人だけ**にしておけば、両側から書いて壊し合うことがない。
 
 ```
 スマホ: daruma-mobile.json  を書く（PC は読むだけ）
-PC:     daruma-archive.json を書く（スマホは読むだけ）
+PC:     daruma-index.json・daruma-YYYY-MM.json を書く（スマホは読むだけ）
 ```
 
-置き場所は `daruma-archive.json` と同じフォルダにする。そこは PC の Drive
+置き場所は `daruma-index.json` と同じフォルダにする。そこは PC の Drive
 デスクトップ版が同期しているフォルダなので、上げれば PC のローカルにも降りてくる。
 拡張機能はそれをローカルファイルとして読むので、**拡張機能側に OAuth を足さずに済む**。
 

@@ -16,6 +16,13 @@
 
 import { parseVideoId, streamSummary, fetchOEmbed, firstBullet } from './summarize.js';
 
+// PC の拡張機能（v0.13〜）は、要約を「要約した月」ごとのファイルに分けて書く。
+//   daruma-index.json    目次（全件数と、月ごとのファイル名・件数）
+//   daruma-YYYY-MM.json  その月の要約
+// 1件増えても変わるのはその月のファイルだけなので、こちらも変わった月だけ落とせばよい。
+// 目次が無いとき（PC が v0.12 まで）は、全件入りの daruma-archive.json を読む。
+const INDEX_FILE = 'daruma-index.json';
+const MONTH_FILE = /^daruma-\d{4}-\d{2}\.json$/;
 const DATA_FILE = 'daruma-archive.json';
 const NOTES_FILE = 'daruma-notes.json';
 // スマホで作った要約はこの別ファイルに書く。PC が書く daruma-archive.json を
@@ -778,6 +785,111 @@ async function fetchDriveJsonIfChanged(token, name, { force = false } = {}) {
   return { data, commit: () => localStorage.setItem(pulledKey(name), stamp) };
 }
 
+const driveStamp = (f) => `${f.id}:${f.md5Checksum || f.modifiedTime}`;
+const monthCacheKey = (name) => `m:${name}`;
+// 端末に覚えた月のファイルが欠けている（保存の途中で閉じた等）。次の取り込みで必ず落とし直す。
+let cacheIncomplete = false;
+
+/** フォルダ直下のファイルの指紋を1回でまとめて取る。{ 名前: {id, md5Checksum, ...} } */
+async function listDriveFolder(token, folderId) {
+  const out = new Map();
+  if (!folderId) return out;
+  let pageToken = '';
+  do {
+    const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+    const url =
+      `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=1000` +
+      `&fields=nextPageToken,files(id,name,md5Checksum,modifiedTime)${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+    const j = await (await driveFetch(url, token)).json();
+    // 同じ名前が2つあるときは新しい方（並びが新しい順なので先に来た方）
+    for (const f of j.files || []) if (!out.has(f.name)) out.set(f.name, f);
+    pageToken = j.nextPageToken || '';
+  } while (pageToken);
+  return out;
+}
+
+/** 月ごとの中身を1つの一覧にまとめる。同じ動画が2つの月にあれば新しい方。 */
+function assembleMonths(meta, parts) {
+  const map = new Map();
+  for (const p of parts) {
+    for (const r of p?.items || []) {
+      if (!r?.videoId) continue;
+      const cur = map.get(r.videoId);
+      if (!cur || (r.updatedAt || 0) > (cur.updatedAt || 0)) map.set(r.videoId, r);
+    }
+  }
+  return { version: 1, generatedAt: meta.generatedAt || 0, count: map.size, items: [...map.values()] };
+}
+
+/** 端末に覚えている Drive 由来の要約。月ごとに覚えていれば組み立てる。 */
+async function loadCachedArchive() {
+  const a = await idb.get('archive').catch(() => null);
+  if (!a) return null;
+  if (!Array.isArray(a.months)) return a; // PC が v0.12 までのときの全件ファイル
+  const parts = await Promise.all(a.months.map((f) => idb.get(monthCacheKey(f)).catch(() => null)));
+  cacheIncomplete = parts.some((p) => !p);
+  return assembleMonths(a, parts);
+}
+
+/**
+ * Drive の要約を取り込む。変わっていなければ落とさない。
+ * 戻り値: { missing } / { unchanged } / { data, save, downloaded }。
+ * save は画面に出す前に呼ぶ（端末に覚えてから「取り込み済み」とする）。
+ */
+async function fetchArchiveFromDrive(token, { force = false } = {}) {
+  const idx = await findDriveFile(token, INDEX_FILE, 'id,name,parents,md5Checksum,modifiedTime');
+  if (!idx) {
+    const arch = await fetchDriveJsonIfChanged(token, DATA_FILE, { force });
+    if (!arch.data) return arch;
+    return {
+      data: arch.data,
+      downloaded: 1,
+      save: async () => {
+        await idb.set('archive', arch.data);
+        arch.commit();
+      },
+    };
+  }
+  const stamp = driveStamp(idx);
+  if (!force && localStorage.getItem(pulledKey(INDEX_FILE)) === stamp) return { unchanged: true };
+  const index = await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${idx.id}?alt=media`, token)).json();
+  const months = (index.months || []).map((m) => m.file).filter((f) => MONTH_FILE.test(f || ''));
+  const listing = await listDriveFolder(token, idx.parents?.[0]);
+
+  const parts = [];
+  let downloaded = 0;
+  let missing = 0;
+  for (const name of months) {
+    const f = listing.get(name) || (await findDriveFile(token, name, 'id,name,md5Checksum,modifiedTime'));
+    if (!f) {
+      // 目次は Drive に届いたが、月のファイルがまだ届いていない（PC からの送信の途中）
+      missing++;
+      parts.push(await idb.get(monthCacheKey(name)).catch(() => null));
+      continue;
+    }
+    const fstamp = driveStamp(f);
+    let data = localStorage.getItem(pulledKey(name)) === fstamp ? await idb.get(monthCacheKey(name)).catch(() => null) : null;
+    if (!data) {
+      data = await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, token)).json();
+      await idb.set(monthCacheKey(name), data);
+      localStorage.setItem(pulledKey(name), fstamp);
+      downloaded++;
+    }
+    parts.push(data);
+  }
+  const meta = { version: 2, generatedAt: index.generatedAt || 0, count: index.count || 0, months };
+  return {
+    data: assembleMonths(meta, parts),
+    downloaded,
+    save: async () => {
+      await idb.set('archive', meta);
+      cacheIncomplete = parts.some((p) => !p);
+      // 欠けた月があるときは目次を「取り込み済み」にしない。次の取り込みでまた見に行く。
+      if (!missing) localStorage.setItem(pulledKey(INDEX_FILE), stamp);
+    },
+  };
+}
+
 /* --------------------------------------------- スマホ→PC の書き戻し */
 
 /**
@@ -837,7 +949,7 @@ async function pushMobileToDrive() {
   }
 
   // 初回。PC が読んでいるフォルダと同じ場所に作る。
-  const archive = await findDriveFile(token, DATA_FILE, 'id,parents');
+  const archive = (await findDriveFile(token, INDEX_FILE, 'id,parents')) || (await findDriveFile(token, DATA_FILE, 'id,parents'));
   const parents = archive?.parents || [];
   const boundary = 'daruma' + Math.random().toString(36).slice(2);
   const meta = { name: MOBILE_FILE, mimeType: 'application/json', ...(parents.length ? { parents } : {}) };
@@ -862,15 +974,14 @@ async function pullFromDrive({ interactive = false } = {}) {
   try {
     const token = await getToken({ interactive });
 
-    // 手元に何も無いときは、指紋が同じでも必ず落とす（端末のデータを消した後など）。
-    const arch = await fetchDriveJsonIfChanged(token, DATA_FILE, { force: !driveItems.length });
+    // 手元に何も無い・欠けているときは、指紋が同じでも必ず見に行く（端末のデータを消した後など）。
+    const arch = await fetchArchiveFromDrive(token, { force: !driveItems.length || cacheIncomplete });
     if (arch.missing) {
-      throw new Error(`${DATA_FILE} が Drive に見つかりません。PC 側で一度「Drive へ同期」してください。`);
+      throw new Error(`要約ファイル（${INDEX_FILE}）が Drive に見つかりません。PC 側で一度「Drive へ同期」してください。`);
     }
     lastPullAt = Date.now();
     if (!arch.unchanged) {
-      await idb.set('archive', arch.data);
-      arch.commit();
+      await arch.save();
       applyData(arch.data);
     }
 
@@ -1211,10 +1322,15 @@ $('signOut').addEventListener('click', () => {
 $('clearCache').addEventListener('click', async () => {
   // 消すのは Drive から取り込んだ分だけ。
   // この端末で作った要約は Drive に無いので、消すと取り返しがつかない。
+  const meta = await idb.get('archive').catch(() => null);
+  for (const f of meta?.months || []) await idb.set(monthCacheKey(f), null);
   await idb.set('archive', null);
   // 「取り込み済み」の覚えも消す。残すと、次の取り込みで「変わっていない」と判断して
-  // 何も落とさず、消したまま戻らなくなる。
-  localStorage.removeItem(pulledKey(DATA_FILE));
+  // 何も落とさず、消したまま戻らなくなる。ノートは消していないので、ノートの覚えは残す。
+  for (const k of Object.keys(localStorage)) {
+    if (k.startsWith('daruma.pulled.') && k !== pulledKey(NOTES_FILE)) localStorage.removeItem(k);
+  }
+  cacheIncomplete = false;
   driveItems = [];
   generatedAt = 0;
   selectedId = null;
@@ -1287,7 +1403,7 @@ $('q').addEventListener('input', (e) => {
 
   // まずキャッシュを出す。オフラインでもすぐ読める状態にしてから通信する。
   initSplitter();
-  const cached = await idb.get('archive').catch(() => null);
+  const cached = await loadCachedArchive().catch(() => null);
   if (cached) applyData(cached);
   mobileItems = (await idb.get('mobile').catch(() => null)) || [];
   // 前回の生成中に画面を閉じた分が「要約中」のまま残らないようにする。
