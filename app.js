@@ -44,7 +44,6 @@ let items = [];
 let driveItems = [];
 let mobileItems = [];
 let term = '';
-let channel = '';
 let generatedAt = 0;
 let notesData = [];
 let noteTerm = '';
@@ -327,29 +326,10 @@ function haystack(r) {
 function filtered() {
   const t = norm(term);
   return items.filter((r) => {
-    if (channel && r.channel !== channel) return false;
     if (!inPeriod(r)) return false;
     if (!t) return true;
     return haystack(r).includes(t);
   });
-}
-
-function renderChannels() {
-  const box = $('chans');
-  box.replaceChildren();
-  const names = [...new Set(items.map((r) => r.channel).filter(Boolean))].sort();
-  const mk = (label, value) => {
-    const b = el('button', null, label);
-    b.setAttribute('aria-pressed', String(channel === value));
-    b.addEventListener('click', () => {
-      channel = channel === value ? '' : value;
-      renderChannels();
-      renderList();
-    });
-    return b;
-  };
-  box.appendChild(mk('すべて', ''));
-  for (const n of names) box.appendChild(mk(n, n));
 }
 
 // スマホで千件を一度に描くと開くたびに重い。見える分から順に足していく。
@@ -1085,7 +1065,6 @@ function recomputeItems() {
   }
   // 要約した日の新しい順（質問しただけの古い動画が先頭に来ないように）
   items = [...map.values()].sort((a, b) => summarizedAt(b) - summarizedAt(a));
-  renderChannels();
   renderPeriod();
   renderList();
 }
@@ -1225,9 +1204,21 @@ $('summarizeBtn').addEventListener('click', () => {
   const v = $('ytUrl').value.trim();
   if (v) {
     $('ytUrl').value = '';
+    showUrlBar(false);
     handleIncoming(v);
   }
 });
+$('ytUrl').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('summarizeBtn').click();
+});
+
+// URL を貼る欄は畳んでおき、🔗 で開く
+function showUrlBar(on) {
+  $('summarizeBar').hidden = !on;
+  $('openUrl').setAttribute('aria-expanded', String(on));
+  if (on) $('ytUrl').focus();
+}
+$('openUrl').addEventListener('click', () => showUrlBar($('summarizeBar').hidden));
 
 const fmtTokens = (n) => (n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n));
 

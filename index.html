@@ -18,6 +18,8 @@
         <img class="mark" src="icons/icon-192.png" alt="" />
         <span class="title">DARUMA</span>
         <span class="spacer"></span>
+        <!-- URL を貼って要約する欄は、ふだんは畳んでおく（共有シートから来るのが主な入口。縦の場所を空ける） -->
+        <button id="openUrl" class="icon-btn" title="URL を貼って要約" aria-label="URL を貼って要約" aria-expanded="false">🔗</button>
         <button id="openNotes" class="icon-btn" title="ノート" aria-label="ノート">📝</button>
         <button id="refresh" class="icon-btn" title="Drive から取り込む" aria-label="更新">⟳</button>
         <button id="openSettings" class="icon-btn" title="設定" aria-label="設定">⚙</button>
@@ -31,12 +33,12 @@
 
       <!-- YouTube アプリの共有シートから渡された URL をここで受ける。
            手で貼り付けても使えるようにしておく（共有が使えない場面の逃げ道）。 -->
-      <div class="summarize-bar">
+      <div id="summarizeBar" class="summarize-bar" hidden>
         <input id="ytUrl" type="url" inputmode="url" placeholder="YouTube の URL を貼って要約" autocomplete="off" />
         <button id="summarizeBtn" class="btn primary">要約</button>
       </div>
 
-      <div id="chans" class="chips"></div>
+      <!-- チャンネルの絞り込みは外した（縦の場所を空けるため。チャンネル名は検索欄で探せる） -->
       <div id="status" class="status"></div>
       <!-- PC に頼んだ動画（届くまでここに出す） -->
       <div id="requests" class="requests" hidden></div>
