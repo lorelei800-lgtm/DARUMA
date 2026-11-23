@@ -79,6 +79,12 @@ Gemini API がブラウザから直接叩けること（CORS 許可）は実測�
 `daruma-mobile.json` の `notes` で PC に送る。PC が取り込んで `daruma-notes.json` に載ったら、
 端末の分は消す（それまではノート画面に「スマホ・PC へ送信待ち」と出る）。
 
+### 要約を削除する
+
+要約の画面の「削除」で消せる。この端末から消し、`daruma-mobile.json` の `deletes` で PC に伝える。
+PC の拡張機能（v0.21.0〜）が当てて同期すると、Drive の要約ファイルからも消え、`daruma-index.json` の
+`deleted` に載る。載ったら、こちらの控えは外す。PC で消したものも `deleted` を見て一覧から外す。
+
 ### 端末で作った要約の扱い
 
 Drive から取り込んだ分（`driveItems`）と端末で作った分（`mobileItems`）は

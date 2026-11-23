@@ -54,6 +54,11 @@ let mobileRequests = [];
 let pcRequestStatus = {};
 // この端末で作ったノート。PC が取り込んで daruma-notes.json に載るまでは、こちらで持つ
 let mobileNotes = [];
+// この端末で消した要約 [{ videoId, at }]。PC に伝えるまで持つ（daruma-mobile.json の deletes）
+let mobileDeletes = [];
+// PC で消した要約 { 動画ID: 消した時刻 }（daruma-index.json の deleted）
+let pcDeleted = {};
+const DELETE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 let tokenClient = null;
 let accessToken = null;
 let tokenExpiresAt = 0;
@@ -645,6 +650,12 @@ function renderDetail(r) {
       bar.appendChild(b);
     }
   }
+  // 要らない要約を消す（要約の途中は出さない）
+  if (!['starting', 'streaming'].includes(r.status)) {
+    const del = el('button', 'btn del', '削除');
+    del.addEventListener('click', () => deleteSummary(r));
+    bar.appendChild(del);
+  }
   box.appendChild(bar);
 
   if (r.error) {
@@ -842,7 +853,7 @@ function assembleMonths(meta, parts) {
       if (!cur || (r.updatedAt || 0) > (cur.updatedAt || 0)) map.set(r.videoId, r);
     }
   }
-  return { version: 1, generatedAt: meta.generatedAt || 0, count: map.size, items: [...map.values()], requests: meta.requests || {} };
+  return { version: 1, generatedAt: meta.generatedAt || 0, count: map.size, items: [...map.values()], requests: meta.requests || {}, deleted: meta.deleted || {} };
 }
 
 /** 端末に覚えている Drive 由来の要約。月ごとに覚えていれば組み立てる。 */
@@ -902,7 +913,7 @@ async function fetchArchiveFromDrive(token, { force = false } = {}) {
     parts.push(data);
   }
   // requests: PC が書く「頼みごとの状態」（PC に頼む、v0.20.0〜）
-  const meta = { version: 2, generatedAt: index.generatedAt || 0, count: index.count || 0, months, requests: index.requests || {} };
+  const meta = { version: 2, generatedAt: index.generatedAt || 0, count: index.count || 0, months, requests: index.requests || {}, deleted: index.deleted || {} };
   return {
     data: assembleMonths(meta, parts),
     downloaded,
@@ -946,7 +957,7 @@ async function checkUpload(res) {
 
 async function pushMobileToDrive({ force = false } = {}) {
   // 頼みごとを全部取り消したときなどは、空でも書く（PC が古い頼みごとを見続けないように）
-  if (!force && !mobileItems.length && !mobileRequests.length && !mobileNotes.length) return null;
+  if (!force && !mobileItems.length && !mobileRequests.length && !mobileNotes.length && !mobileDeletes.length) return null;
   if (!LS.clientId) return null; // Google 連携そのものが未設定。要約は端末に残る。
   const token = await getToken({ interactive: false });
 
@@ -961,6 +972,8 @@ async function pushMobileToDrive({ force = false } = {}) {
     requests: mobileRequests.map(({ videoId, title, channel, at }) => ({ videoId, title, channel, at })),
     // この端末で作ったノート（PC が取り込む）
     notes: mobileNotes,
+    // この端末で消した要約（PC が当てて、Drive からも消す）
+    deletes: mobileDeletes,
   });
 
   const existing = await findDriveFile(token, MOBILE_FILE, 'id,name');
@@ -1056,10 +1069,17 @@ async function pullFromDrive({ interactive = false, quiet = false } = {}) {
  * Drive 由来と端末由来をひとつの一覧にまとめ直す。
  * 同じ動画が両方にある場合は新しい方を採る。
  */
+// 消した要約か（消した後に作り直したものは消えていない扱い）
+function isDeleted(r) {
+  const at = Math.max(pcDeleted[r.videoId] || 0, mobileDeletes.find((d) => d.videoId === r.videoId)?.at || 0);
+  return at > 0 && (r.updatedAt || r.createdAt || 0) <= at;
+}
+
 function recomputeItems() {
   const map = new Map();
-  for (const r of driveItems) map.set(r.videoId, r);
+  for (const r of driveItems) if (!isDeleted(r)) map.set(r.videoId, r);
   for (const r of mobileItems) {
+    if (isDeleted(r)) continue;
     const cur = map.get(r.videoId);
     if (!cur || (r.updatedAt || 0) >= (cur.updatedAt || 0)) map.set(r.videoId, r);
   }
@@ -1074,6 +1094,8 @@ function applyData(data) {
   driveItems = (data?.items || []).slice();
   generatedAt = data?.generatedAt || 0;
   pcRequestStatus = data?.requests || {};
+  pcDeleted = data?.deleted || {};
+  settleDeletes();
   recomputeItems();
   setStatus(
     $('dataStatus'),
@@ -1679,6 +1701,8 @@ $('q').addEventListener('input', (e) => {
 
   // まずキャッシュを出す。オフラインでもすぐ読める状態にしてから通信する。
   initSplitter();
+  // 消した要約の控えは、一覧を作る前に読む（消したものが一瞬出ないように）
+  mobileDeletes = (await idb.get('deletes').catch(() => null)) || [];
   const cached = await loadCachedArchive().catch(() => null);
   if (cached) applyData(cached);
   mobileItems = (await idb.get('mobile').catch(() => null)) || [];
@@ -1712,6 +1736,48 @@ $('q').addEventListener('input', (e) => {
     pullFromDrive({ interactive: false });
   }
 })();
+
+/* ------------------------------------------------- 要約を消す */
+
+/*
+ * この端末から消し、daruma-mobile.json の deletes で PC に伝える。PC が消して同期すると、
+ * daruma-index.json の deleted に載り、Drive の要約ファイルからも消える。
+ * PC が当てたもの（deleted に載ったもの）と、古くなったものは、こちらの控えから外す。
+ */
+async function deleteSummary(r) {
+  if (!window.confirm(`「${r.title || r.videoId}」の要約を削除します。\n\nこのスマホから消え、PC・Drive からも消えます（PC の Chrome が開いているとき）。元に戻せません。\n\n削除しますか？`)) return;
+  const at = Date.now();
+  mobileDeletes = [{ videoId: r.videoId, at }, ...mobileDeletes.filter((d) => d.videoId !== r.videoId)];
+  mobileItems = mobileItems.filter((x) => x.videoId !== r.videoId);
+  await idb.set('deletes', mobileDeletes).catch(() => {});
+  await saveMobileItems();
+  selectedId = null;
+  recomputeItems();
+  if (detailOpen) history.back();
+  else renderDetailPlaceholder();
+  setStatus($('status'), '削除しました');
+  try {
+    await pushMobileToDrive({ force: true });
+  } catch (e) {
+    setStatus($('status'), `削除しましたが、PC に伝えられませんでした（次に送るときに伝えます）: ${e.message}`, true);
+  }
+}
+
+/** PC が当てた削除と、古い控えを片付ける。端末で作った要約のうち消したものも捨てる。 */
+function settleDeletes() {
+  const now = Date.now();
+  const before = mobileDeletes.length;
+  mobileDeletes = mobileDeletes.filter((d) => !pcDeleted[d.videoId] && now - (d.at || 0) < DELETE_KEEP_MS);
+  // 端末で作った要約のうち消したもの。起動の途中（まだ読んでいない）なら何もしない
+  if (mobileItems.length) {
+    const mBefore = mobileItems.length;
+    mobileItems = mobileItems.filter((r) => !isDeleted(r));
+    if (mobileItems.length !== mBefore) saveMobileItems();
+  }
+  // ここでは Drive に送らない（起動の途中で、端末の要約を読む前に呼ばれることがある）。
+  // 控えが減っただけなので、次に送るときに一緒に伝われば足りる（PC は同じ削除を二度当てても同じ）
+  if (mobileDeletes.length !== before) idb.set('deletes', mobileDeletes).catch(() => {});
+}
 
 /* ------------------------------------------------- スマホでノートを作る（v0.20.0〜） */
 
