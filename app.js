@@ -14,7 +14,7 @@
  * 同じファイルを PC と両方から書くと衝突するため、その設計は別途行う。
  */
 
-import { parseVideoId, streamSummary, fetchOEmbed, firstBullet } from './summarize.js';
+import { parseVideoId, streamSummary, fetchOEmbed, firstBullet, VIDEO_FPS } from './summarize.js';
 
 // PC の拡張機能（v0.13〜）は、要約を「要約した月」ごとのファイルに分けて書く。
 //   daruma-index.json    目次（全件数と、月ごとのファイル名・件数）
@@ -48,6 +48,12 @@ let channel = '';
 let generatedAt = 0;
 let notesData = [];
 let noteTerm = '';
+// PC に頼んだ動画（v0.20.0〜）。daruma-mobile.json の requests に載せて Drive に上げる
+let mobileRequests = [];
+// PC が daruma-index.json に書く、頼みごとの状態（できた・できなかった）
+let pcRequestStatus = {};
+// この端末で作ったノート。PC が取り込んで daruma-notes.json に載るまでは、こちらで持つ
+let mobileNotes = [];
 let tokenClient = null;
 let accessToken = null;
 let tokenExpiresAt = 0;
@@ -73,6 +79,22 @@ const LS = {
   },
   set model(v) {
     localStorage.setItem('daruma.model', v || DEFAULT_MODEL);
+  },
+  // 動画を何コマ読むか（summarize.js の VIDEO_FPS）。既定は少なめ（利用料を抑える）
+  get videoDetail() {
+    const v = localStorage.getItem('daruma.videoDetail');
+    return v === 'normal' ? 'normal' : 'low';
+  },
+  set videoDetail(v) {
+    localStorage.setItem('daruma.videoDetail', v === 'normal' ? 'normal' : 'low');
+  },
+  // 共有・URL から来たとき: ask（毎回選ぶ）・pc（PC に頼む）・phone（スマホで要約）
+  get shareMode() {
+    const v = localStorage.getItem('daruma.shareMode');
+    return ['pc', 'phone'].includes(v) ? v : 'ask';
+  },
+  set shareMode(v) {
+    localStorage.setItem('daruma.shareMode', ['pc', 'phone'].includes(v) ? v : 'ask');
   },
 };
 
@@ -596,6 +618,8 @@ function renderDetail(r) {
     r.channel,
     fmtDur(r.durationSec),
     r.source === 'video-native' ? '動画解析' : r.lang ? `字幕 ${r.lang}` : null,
+    // スマホで要約したときに読んだ量（利用料の目安）
+    r.tokensIn ? `${fmtTokens(r.tokensIn)} トークン` : null,
     fmtDate(r.updatedAt),
   ].filter(Boolean)) {
     chips.appendChild(el('span', 'chip', bit));
@@ -818,7 +842,7 @@ function assembleMonths(meta, parts) {
       if (!cur || (r.updatedAt || 0) > (cur.updatedAt || 0)) map.set(r.videoId, r);
     }
   }
-  return { version: 1, generatedAt: meta.generatedAt || 0, count: map.size, items: [...map.values()] };
+  return { version: 1, generatedAt: meta.generatedAt || 0, count: map.size, items: [...map.values()], requests: meta.requests || {} };
 }
 
 /** 端末に覚えている Drive 由来の要約。月ごとに覚えていれば組み立てる。 */
@@ -877,7 +901,8 @@ async function fetchArchiveFromDrive(token, { force = false } = {}) {
     }
     parts.push(data);
   }
-  const meta = { version: 2, generatedAt: index.generatedAt || 0, count: index.count || 0, months };
+  // requests: PC が書く「頼みごとの状態」（PC に頼む、v0.20.0〜）
+  const meta = { version: 2, generatedAt: index.generatedAt || 0, count: index.count || 0, months, requests: index.requests || {} };
   return {
     data: assembleMonths(meta, parts),
     downloaded,
@@ -919,8 +944,9 @@ async function checkUpload(res) {
   throw new Error(`Drive への書き込みに失敗 (${res.status}) ${msg.slice(0, 160)}`);
 }
 
-async function pushMobileToDrive() {
-  if (!mobileItems.length) return null;
+async function pushMobileToDrive({ force = false } = {}) {
+  // 頼みごとを全部取り消したときなどは、空でも書く（PC が古い頼みごとを見続けないように）
+  if (!force && !mobileItems.length && !mobileRequests.length && !mobileNotes.length) return null;
   if (!LS.clientId) return null; // Google 連携そのものが未設定。要約は端末に残る。
   const token = await getToken({ interactive: false });
 
@@ -931,6 +957,10 @@ async function pushMobileToDrive() {
     count: mobileItems.length,
     // 生成途中や失敗したものは送らない。PC 側に半端な要約を混ぜない。
     items: mobileItems.filter((r) => r.status === 'done' && r.quick),
+    // PC に頼んだ動画（PC の拡張機能が数分おきに見て要約する）
+    requests: mobileRequests.map(({ videoId, title, channel, at }) => ({ videoId, title, channel, at })),
+    // この端末で作ったノート（PC が取り込む）
+    notes: mobileNotes,
   });
 
   const existing = await findDriveFile(token, MOBILE_FILE, 'id,name');
@@ -967,10 +997,10 @@ async function pushMobileToDrive() {
   return parents.length ? 'created' : 'created-in-root';
 }
 
-async function pullFromDrive({ interactive = false } = {}) {
+async function pullFromDrive({ interactive = false, quiet = false } = {}) {
   const btn = $('refresh');
   btn.classList.add('spin');
-  setStatus($('status'), 'Drive から取り込んでいます…');
+  if (!quiet) setStatus($('status'), 'Drive から取り込んでいます…');
   try {
     const token = await getToken({ interactive });
 
@@ -992,20 +1022,31 @@ async function pullFromDrive({ interactive = false } = {}) {
         await idb.set('notes', notes.data);
         notes.commit();
         applyNotes(notes.data);
+        // PC が取り込んだ（daruma-notes.json に載った）ノートは、こちらで持たなくてよい
+        const before = mobileNotes.length;
+        const pcIds = new Set(notesData.map((n) => n.id));
+        mobileNotes = mobileNotes.filter((n) => !pcIds.has(n.id));
+        if (mobileNotes.length !== before) {
+          await idb.set('mobileNotes', mobileNotes).catch(() => {});
+          pushMobileToDrive({ force: true }).catch(() => {});
+        }
       }
     } catch (_) {
       /* ノート取得の失敗は要約の取り込みを妨げない */
     }
 
-    setStatus(
-      $('status'),
-      arch.unchanged
-        ? `最新です（${items.length} 件・${fmtDate(generatedAt)} 時点）`
-        : `${items.length} 件を取り込みました（${fmtDate(generatedAt)} 時点）`
-    );
-    setTimeout(() => setStatus($('status'), ''), 4000);
+    if (!quiet) {
+      setStatus(
+        $('status'),
+        arch.unchanged
+          ? `最新です（${items.length} 件・${fmtDate(generatedAt)} 時点）`
+          : `${items.length} 件を取り込みました（${fmtDate(generatedAt)} 時点）`
+      );
+      setTimeout(() => setStatus($('status'), ''), 4000);
+    }
+    await settleRequests();
   } catch (e) {
-    setStatus($('status'), e.message, true);
+    if (!quiet) setStatus($('status'), e.message, true);
   } finally {
     btn.classList.remove('spin');
   }
@@ -1032,6 +1073,7 @@ function recomputeItems() {
 function applyData(data) {
   driveItems = (data?.items || []).slice();
   generatedAt = data?.generatedAt || 0;
+  pcRequestStatus = data?.requests || {};
   recomputeItems();
   setStatus(
     $('dataStatus'),
@@ -1107,7 +1149,11 @@ async function runSummarize(input) {
   });
 
   try {
-    for await (const ev of streamSummary({ apiKey: LS.apiKey, model: LS.model, videoId })) {
+    for await (const ev of streamSummary({ apiKey: LS.apiKey, model: LS.model, videoId, fps: VIDEO_FPS[LS.videoDetail] })) {
+      if (ev.usage) {
+        rec.tokensIn = ev.usage.promptTokenCount || rec.tokensIn || 0;
+        rec.tokensOut = ev.usage.candidatesTokenCount || rec.tokensOut || 0;
+      }
       if (ev.text) {
         if (rec.status !== 'streaming') {
           rec.status = 'streaming';
@@ -1140,9 +1186,13 @@ async function runSummarize(input) {
   // 端末に保存できた後で PC へ送る。ここが失敗しても要約は手元に残っているので、
   // 要約そのものを失敗扱いにはしない。
   if (rec.status === 'done') {
+    // PC にも頼んでいたら、それは取り消す（スマホで出来たので）
+    mobileRequests = mobileRequests.filter((x) => x.videoId !== videoId);
+    await saveRequests();
+    renderRequests();
     try {
-      await pushMobileToDrive();
-      setStatus($('status'), 'PC にも送りました');
+      await pushMobileToDrive({ force: true });
+      setStatus($('status'), `PC にも送りました${rec.tokensIn ? `（この要約で読んだ量: ${fmtTokens(rec.tokensIn)} トークン）` : ''}`);
     } catch (e) {
       setStatus($('status'), `PC への送信は失敗しました（要約は端末に保存済み）: ${e.message}`, true);
     }
@@ -1153,9 +1203,214 @@ $('summarizeBtn').addEventListener('click', () => {
   const v = $('ytUrl').value.trim();
   if (v) {
     $('ytUrl').value = '';
-    runSummarize(v);
+    handleIncoming(v);
   }
 });
+
+const fmtTokens = (n) => (n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n));
+
+/* ------------------------------------------------- PC に頼む（v0.20.0〜） */
+
+/*
+ * スマホで共有した動画を、PC の拡張機能に要約してもらう。
+ *   スマホ: daruma-mobile.json の requests に書いて Drive に上げる（このファイルの書き手はスマホだけ）
+ *   PC:     数分おきにそれを見て、字幕で要約し、いつもの同期で要約ファイルに載せる
+ *           できなかった理由は daruma-index.json の requests に書く（こちらの書き手は PC だけ）
+ * 要約が一覧に届いたら、頼みごとはここから消す。
+ */
+const REQ_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+let reqTimer = null;
+
+async function saveRequests() {
+  await idb.set('requests', mobileRequests).catch(() => {});
+}
+
+const hasSummary = (videoId) =>
+  driveItems.some((r) => r.videoId === videoId && (r.quick || r.deep)) ||
+  mobileItems.some((r) => r.videoId === videoId && r.status === 'done' && r.quick);
+
+/** 届いた・古くなった頼みごとを片付ける。 */
+async function settleRequests() {
+  const now = Date.now();
+  const before = mobileRequests.length;
+  mobileRequests = mobileRequests.filter((r) => now - (r.at || 0) < REQ_MAX_AGE_MS && !hasSummary(r.videoId));
+  if (mobileRequests.length !== before) {
+    await saveRequests();
+    pushMobileToDrive({ force: true }).catch(() => {});
+  }
+  renderRequests();
+}
+
+async function requestOnPc(videoId, meta = null) {
+  if (!LS.clientId) {
+    setStatus($('status'), 'PC に頼むには、設定から Google と連携してください', true);
+    openSettings();
+    return;
+  }
+  const cur = mobileRequests.find((r) => r.videoId === videoId);
+  const rec = { videoId, title: meta?.title || cur?.title || '', channel: meta?.channel || cur?.channel || '', at: Date.now() };
+  mobileRequests = [rec, ...mobileRequests.filter((r) => r.videoId !== videoId)];
+  await saveRequests();
+  renderRequests();
+  if (!rec.title) {
+    fetchOEmbed(videoId).then(async (m) => {
+      if (!m) return;
+      rec.title = m.title;
+      rec.channel = m.channel;
+      await saveRequests();
+      renderRequests();
+    });
+  }
+  try {
+    await pushMobileToDrive({ force: true });
+    setStatus($('status'), 'PC に頼みました。PC の Chrome が開いていれば、数分で要約が届きます');
+  } catch (e) {
+    setStatus($('status'), `PC に頼めませんでした: ${e.message}`, true);
+  }
+  watchRequests();
+}
+
+async function cancelRequest(videoId) {
+  mobileRequests = mobileRequests.filter((r) => r.videoId !== videoId);
+  await saveRequests();
+  renderRequests();
+  pushMobileToDrive({ force: true }).catch((e) => setStatus($('status'), e.message, true));
+}
+
+/** 頼んでいる間は、1 分おきに Drive を見に行く（画面を見ているときだけ）。 */
+function watchRequests() {
+  if (reqTimer || !mobileRequests.length) return;
+  reqTimer = setInterval(() => {
+    if (!mobileRequests.length) {
+      clearInterval(reqTimer);
+      reqTimer = null;
+      return;
+    }
+    if (document.visibilityState === 'visible' && navigator.onLine && LS.clientId) pullFromDrive({ quiet: true });
+    renderRequests(); // 「頼んでから n 分」を進める
+  }, 60_000);
+}
+
+const agoText = (ms) => {
+  const m = Math.floor((Date.now() - ms) / 60000);
+  if (m < 1) return 'たった今';
+  if (m < 60) return `${m} 分前`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h} 時間前` : `${Math.floor(h / 24)} 日前`;
+};
+
+function requestState(r) {
+  const st = pcRequestStatus[r.videoId];
+  // 前に頼んだときの結果は見ない（頼み直したら、新しい結果を待つ）
+  if (st && (st.requestedAt || 0) >= (r.at || 0)) {
+    if (st.status === 'running') return { text: 'PC で要約しています…' };
+    if (st.status === 'done') return { text: 'PC で要約しました。届くのを待っています…' };
+    if (st.status === 'error') {
+      const why = st.code === 'NO_SUBTITLES' ? 'この動画には字幕がありません' : st.error || st.code || '原因不明';
+      return { text: `PC では要約できませんでした（${why}）`, err: true, retry: !st.final };
+    }
+  }
+  const late = Date.now() - (r.at || 0) > 10 * 60000;
+  return { text: `PC の受け取り待ち（${agoText(r.at)}に頼みました）${late ? '。PC の Chrome が閉じていると進みません' : ''}` };
+}
+
+function renderRequests() {
+  const box = $('requests');
+  box.replaceChildren();
+  box.hidden = !mobileRequests.length;
+  if (!mobileRequests.length) return;
+  box.appendChild(el('div', 'rq-head', `PC に頼んだ動画（${mobileRequests.length}）`));
+  for (const r of mobileRequests) {
+    const row = el('div', 'rq');
+    const img = document.createElement('img');
+    img.src = `https://i.ytimg.com/vi/${r.videoId}/mqdefault.jpg`;
+    img.alt = '';
+    img.loading = 'lazy';
+    const body = el('div', 'rq-body');
+    body.appendChild(el('div', 'rq-t', r.title || r.videoId));
+    const state = requestState(r);
+    body.appendChild(el('div', `rq-s${state.err ? ' err' : ''}`, state.text));
+    const acts = el('div', 'rq-acts');
+    if (LS.apiKey) {
+      const now = el('button', 'btn', 'スマホで要約');
+      now.addEventListener('click', () => runSummarize(r.videoId));
+      acts.appendChild(now);
+    }
+    if (state.retry) {
+      const again = el('button', 'btn', 'もう一度頼む');
+      again.addEventListener('click', () => requestOnPc(r.videoId, r));
+      acts.appendChild(again);
+    }
+    const cancel = el('button', 'btn', '取り消す');
+    cancel.addEventListener('click', () => cancelRequest(r.videoId));
+    acts.appendChild(cancel);
+    body.appendChild(acts);
+    row.append(img, body);
+    box.appendChild(row);
+  }
+}
+
+/* ------------------------------------------------- どこで要約するか */
+
+/**
+ * 共有シート・URL 欄から来た動画。設定（毎回選ぶ・PC に頼む・スマホで要約）に従う。
+ * もう要約がある動画は、要約し直さずにそれを開く。
+ */
+async function handleIncoming(input) {
+  const videoId = parseVideoId(input);
+  if (!videoId) {
+    setStatus($('status'), 'YouTube の動画URLとして読み取れませんでした', true);
+    return;
+  }
+  const have = items.find((r) => r.videoId === videoId && (r.quick || r.deep) && r.status !== 'error');
+  if (have) {
+    openDetail(have);
+    setStatus($('status'), 'この動画はもう要約があります');
+    return;
+  }
+  const mode = LS.shareMode;
+  if (mode === 'pc' && LS.clientId) return requestOnPc(videoId);
+  if (mode === 'phone' && LS.apiKey) return runSummarize(videoId);
+  openChooser(videoId);
+}
+
+let chooserVideo = null;
+function openChooser(videoId) {
+  chooserVideo = videoId;
+  $('chooserThumb').src = `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
+  $('chooserTitle').textContent = '';
+  fetchOEmbed(videoId).then((m) => {
+    if (m && chooserVideo === videoId) $('chooserTitle').textContent = m.title;
+  });
+  $('choosePc').disabled = !LS.clientId;
+  $('choosePc').querySelector('.cd').textContent = LS.clientId
+    ? 'PC が字幕で要約します。安く正確で、PC の Chrome が開いていれば数分で届きます'
+    : '使うには、設定で Google と連携してください';
+  $('choosePhone').disabled = !LS.apiKey;
+  $('choosePhone').querySelector('.cd').textContent = LS.apiKey
+    ? 'Gemini が動画を直接読みます。すぐ読めますが、利用料は多めです'
+    : '使うには、設定で Gemini API キーを登録してください';
+  $('chooserRemember').checked = false;
+  $('chooser').hidden = false;
+}
+const closeChooser = () => {
+  $('chooser').hidden = true;
+  chooserVideo = null;
+};
+$('chooserCancel').addEventListener('click', closeChooser);
+$('chooser').addEventListener('click', (e) => {
+  if (e.target === $('chooser')) closeChooser();
+});
+for (const [id, mode] of [['choosePc', 'pc'], ['choosePhone', 'phone']]) {
+  $(id).addEventListener('click', () => {
+    const v = chooserVideo;
+    if ($('chooserRemember').checked) LS.shareMode = mode;
+    closeChooser();
+    if (!v) return;
+    if (mode === 'pc') requestOnPc(v, { title: $('chooserTitle').textContent });
+    else runSummarize(v);
+  });
+}
 $('ytUrl').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') $('summarizeBtn').click();
 });
@@ -1179,10 +1434,17 @@ function applyNotes(nd) {
   if (!$('notesView').hidden) renderNotes();
 }
 
+// PC から届いたノートと、この端末で作ってまだ PC に取り込まれていないノート
+function allNotes() {
+  const pcIds = new Set(notesData.map((n) => n.id));
+  return [...mobileNotes.filter((n) => !pcIds.has(n.id)), ...notesData].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
 function filteredNotes() {
   const q = normNote(noteTerm);
-  if (!q) return notesData;
-  return notesData.filter((n) => normNote(`${n.text} ${n.memo} ${n.videoTitle} ${n.channel}`).includes(q));
+  const list = allNotes();
+  if (!q) return list;
+  return list.filter((n) => normNote(`${n.text} ${n.memo} ${n.videoTitle} ${n.channel}`).includes(q));
 }
 
 const normNote = (s) =>
@@ -1200,8 +1462,8 @@ function renderNotes() {
   box.replaceChildren();
   const rows = filteredNotes();
 
-  if (!notesData.length) {
-    box.appendChild(el('div', 'empty', 'まだノートがありません。PC の拡張機能で要約の文章を選ぶと追加できます。'));
+  if (!notesData.length && !mobileNotes.length) {
+    box.appendChild(el('div', 'empty', 'まだノートがありません。要約の文章を選ぶと追加できます（スマホでも PC でも）。'));
     return;
   }
   if (!rows.length) {
@@ -1242,6 +1504,8 @@ function renderNotes() {
         foot.appendChild(a);
       }
       foot.appendChild(el('span', null, fmtDate(n.createdAt)));
+      // まだ PC に取り込まれていない、この端末のノート
+      if (mobileNotes.some((m) => m.id === n.id)) foot.appendChild(el('span', 'src', 'スマホ・PC へ送信待ち'));
       card.appendChild(foot);
       box.appendChild(card);
     }
@@ -1270,6 +1534,8 @@ function openSettings() {
   $('clientId').value = LS.clientId;
   $('apiKey').value = LS.apiKey;
   $('mobileModel').value = LS.model;
+  $('videoDetail').value = LS.videoDetail;
+  $('shareMode').value = LS.shareMode;
   renderDiag();
   // 設定は 2ペインでも全画面で出す
   document.querySelector('.shell').hidden = true;
@@ -1296,6 +1562,16 @@ $('saveApiKey').addEventListener('click', () => {
       : 'キーを空にしました。スマホ側での要約はできません。',
     !LS.apiKey
   );
+});
+
+// 動画の読み方・共有したときの動きは、選んだ瞬間に保存する
+$('videoDetail').addEventListener('change', () => {
+  LS.videoDetail = $('videoDetail').value;
+  setStatus($('prefStatus'), '保存しました');
+});
+$('shareMode').addEventListener('change', () => {
+  LS.shareMode = $('shareMode').value;
+  setStatus($('prefStatus'), '保存しました');
 });
 
 $('signIn').addEventListener('click', async () => {
@@ -1416,10 +1692,14 @@ $('q').addEventListener('input', (e) => {
   recomputeItems();
   const cachedNotes = await idb.get('notes').catch(() => null);
   if (cachedNotes) applyNotes(cachedNotes);
+  mobileRequests = (await idb.get('requests').catch(() => null)) || [];
+  mobileNotes = (await idb.get('mobileNotes').catch(() => null)) || [];
+  renderRequests();
+  watchRequests();
   applyLayout();
 
   if (shared) {
-    runSummarize(shared);
+    handleIncoming(shared);
     return; // 共有から来たときは要約が主目的。Drive の取り込みは後回しでよい。
   }
 
@@ -1432,6 +1712,74 @@ $('q').addEventListener('input', (e) => {
     pullFromDrive({ interactive: false });
   }
 })();
+
+/* ------------------------------------------------- スマホでノートを作る（v0.20.0〜） */
+
+/*
+ * 要約の文字を選ぶと、画面の下に「ノートに追加」の帯を出す（Android の選択メニューと重ならないよう下に固定）。
+ * ノートは端末に置き、daruma-mobile.json の notes で PC に送る。PC が取り込んで daruma-notes.json に
+ * 載ったら、こちらの分は消す（pullFromDrive を参照）。
+ */
+let pendingSel = '';
+document.addEventListener('selectionchange', () => {
+  const sel = window.getSelection();
+  const text = sel ? sel.toString().trim() : '';
+  const anchorNode = sel && sel.anchorNode;
+  const inSummary = anchorNode && (anchorNode.nodeType === 1 ? anchorNode : anchorNode.parentElement)?.closest?.('#detail .md');
+  if (text.length >= 4 && inSummary && selectedId) {
+    pendingSel = text;
+    $('noteBar').hidden = false;
+  } else if (!text) {
+    // 帯を押した瞬間に選択が外れる端末があるので、少し待ってから消す
+    setTimeout(() => {
+      if (!window.getSelection()?.toString().trim()) $('noteBar').hidden = true;
+    }, 400);
+  }
+});
+
+const firstTs = (text) => {
+  const m = String(text).match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return null;
+  return m[3] ? +m[1] * 3600 + +m[2] * 60 + +m[3] : +m[1] * 60 + +m[2];
+};
+
+async function addMobileNote(withMemo) {
+  const text = pendingSel;
+  if (!text || !selectedId) return;
+  const r = items.find((x) => x.videoId === selectedId) || {};
+  let memo = '';
+  if (withMemo) {
+    const v = window.prompt('メモ（空でも可）', '');
+    if (v === null) return;
+    memo = v.trim();
+  }
+  const now = Date.now();
+  mobileNotes.unshift({
+    id: crypto.randomUUID ? crypto.randomUUID() : `m-${now}-${Math.random().toString(36).slice(2)}`,
+    videoId: selectedId,
+    videoTitle: r.title || '',
+    channel: r.channel || '',
+    text,
+    memo,
+    timestampSec: firstTs(text),
+    tier: detailTier === 'deep' ? 'deep' : 'quick',
+    createdAt: now,
+    updatedAt: now,
+  });
+  await idb.set('mobileNotes', mobileNotes).catch(() => {});
+  window.getSelection()?.removeAllRanges();
+  pendingSel = '';
+  $('noteBar').hidden = true;
+  setStatus($('status'), 'ノートに追加しました');
+  pushMobileToDrive({ force: true }).catch(() => {
+    /* 送れなくても端末には残る。次に送るときに一緒に送る */
+  });
+}
+for (const [id, memo] of [['noteAdd', false], ['noteAddMemo', true]]) {
+  // 押した瞬間に選択が外れないよう、既定の動きを止める
+  $(id).addEventListener('pointerdown', (e) => e.preventDefault());
+  $(id).addEventListener('click', () => addMobileNote(memo));
+}
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

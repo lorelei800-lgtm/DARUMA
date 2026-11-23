@@ -85,13 +85,19 @@ export function parseVideoId(input) {
 
 /* ------------------------------------------------------------ Gemini */
 
-function buildBody(videoId) {
+// 動画を何コマ読むか（1 秒あたり）。Gemini の既定は 1。話が中心の動画なら画面はあまり変わらないので、
+// 5 秒に 1 コマでも要約の質はほぼ変わらず、映像のぶんの利用料が 1/5 になる（音声はそのまま全部読む）。
+export const VIDEO_FPS = { low: 0.2, normal: 1 };
+
+function buildBody(videoId, { fps } = {}) {
+  const video = { fileData: { mimeType: 'video/mp4', fileUri: `https://www.youtube.com/watch?v=${videoId}` } };
+  if (fps && fps !== 1) video.videoMetadata = { fps };
   return {
     contents: [
       {
         role: 'user',
         parts: [
-          { fileData: { mimeType: 'video/mp4', fileUri: `https://www.youtube.com/watch?v=${videoId}` } },
+          video,
           { text: 'この動画を要約してください。' },
         ],
       },
@@ -127,6 +133,8 @@ function parseLine(line) {
   if (!cand) return [];
 
   const out = [];
+  // 使った量（最後の塊に付いてくる）。どれだけ使ったかを画面に出す
+  if (json.usageMetadata) out.push({ usage: json.usageMetadata });
   const text = (cand.content?.parts || []).map((p) => p.text || '').join('');
   if (text) out.push({ text });
   if (cand.finishReason && cand.finishReason !== 'STOP') {
@@ -136,7 +144,7 @@ function parseLine(line) {
 }
 
 /** 要約テキストを少しずつ返す。体感速度はこれで決まる。 */
-export async function* streamSummary({ apiKey, model, videoId, signal }) {
+export async function* streamSummary({ apiKey, model, videoId, signal, fps }) {
   if (!apiKey) {
     const e = new Error('Gemini API キーが未設定です。設定画面で登録してください。');
     e.code = 'NO_API_KEY';
@@ -147,7 +155,7 @@ export async function* streamSummary({ apiKey, model, videoId, signal }) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildBody(videoId)),
+    body: JSON.stringify(buildBody(videoId, { fps })),
     signal,
   });
 

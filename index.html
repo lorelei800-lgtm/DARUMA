@@ -38,6 +38,8 @@
 
       <div id="chans" class="chips"></div>
       <div id="status" class="status"></div>
+      <!-- PC に頼んだ動画（届くまでここに出す） -->
+      <div id="requests" class="requests" hidden></div>
       <main id="list" class="list"></main>
     </div>
 
@@ -62,6 +64,33 @@
       <main id="detail" class="detail-body"></main>
     </div>
     </div><!-- /.shell -->
+
+    <!-- 要約の文字を選んだときに下に出す（スマホでもノートを作る） -->
+    <div id="noteBar" class="note-bar" hidden>
+      <span class="nb-text">選んだ文を</span>
+      <button id="noteAdd" class="btn primary">ノートに追加</button>
+      <button id="noteAddMemo" class="btn">メモ付きで</button>
+    </div>
+
+    <!-- 共有・URL から来たとき、どこで要約するかを選ぶ -->
+    <div id="chooser" class="sheet-backdrop" hidden>
+      <div class="sheet" role="dialog" aria-labelledby="chooserTitle">
+        <div class="sheet-video">
+          <img id="chooserThumb" alt="" />
+          <div id="chooserTitle" class="sheet-title"></div>
+        </div>
+        <button id="choosePc" class="choice">
+          <span class="ct">PC に頼む</span>
+          <span class="cd">PC が字幕で要約します。安く正確で、PC の Chrome が開いていれば数分で届きます</span>
+        </button>
+        <button id="choosePhone" class="choice">
+          <span class="ct">スマホで今すぐ要約</span>
+          <span class="cd">Gemini が動画を直接読みます。すぐ読めますが、利用料は多めです</span>
+        </button>
+        <label class="remember"><input type="checkbox" id="chooserRemember" /> 次からは聞かずにこれにする（設定で戻せます）</label>
+        <button id="chooserCancel" class="btn">やめる</button>
+      </div>
+    </div>
 
     <!-- ------------------------------------------------ ノート -->
     <div id="notesView" class="view" hidden>
@@ -98,6 +127,22 @@
             <button id="saveApiKey" class="btn primary">保存</button>
           </div>
           <p id="apiKeyStatus" class="status"></p>
+          <label for="videoDetail">動画の読み方</label>
+          <select id="videoDetail">
+            <option value="low">少なめ（5 秒に 1 コマ。利用料が少ない。話が中心の動画向け）</option>
+            <option value="normal">標準（1 秒に 1 コマ。画面の文字や図が大事な動画向け）</option>
+          </select>
+          <label for="shareMode">共有・URL から来たとき</label>
+          <select id="shareMode">
+            <option value="ask">毎回選ぶ</option>
+            <option value="pc">PC に頼む</option>
+            <option value="phone">スマホで今すぐ要約</option>
+          </select>
+          <p class="hint">
+            「PC に頼む」は、Google 連携が済んでいれば使えます。頼んだ動画は Drive を通して PC に届き、
+            PC の Chrome が開いていれば DARUMA が字幕で要約して、数分でここに届きます。
+          </p>
+          <p id="prefStatus" class="status"></p>
           <p class="hint">
             YouTube アプリの「共有」から DARUMA を選ぶと、その動画の要約が始まります。
             共有先に出てこないときは、このアプリをホーム画面にインストールしてください。
